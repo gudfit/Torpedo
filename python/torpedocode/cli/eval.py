@@ -3,6 +3,12 @@
 Run as:
   python -m torpedocode.cli.eval --input predictions.csv --pred-col pred --label-col label [--pred2-col pred_b]
   python -m torpedocode.cli.eval --npz preds_labels.npz --pred-key pred --label-key label
+
+Note:
+  Temporal point process (TPP) diagnostics, including per‑type KS p‑values, are written by the
+  training pipeline when invoked with --tpp-diagnostics. See:
+    <artifact_dir>/tpp_test_diagnostics.json
+  Look for key "ks_p_value_per_type" (mapping event_type_id -> p-value).
 """
 
 from __future__ import annotations

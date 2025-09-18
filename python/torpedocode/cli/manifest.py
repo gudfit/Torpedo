@@ -142,6 +142,17 @@ def main():
             argv += ["--strict-tda"]
         if bool(train.get("include_market_embedding", False)):
             argv += ["--include-market-embedding"]
+        # Topology controls (optional): forward to batch_train
+        if bool(train.get("use_topo_selected", False)):
+            argv += ["--use-topo-selected"]
+        if train.get("topology_json") is not None:
+            argv += ["--topology-json", str(train.get("topology_json"))]
+        if train.get("pi_res") is not None:
+            argv += ["--pi-res", str(int(train.get("pi_res")))]
+        if train.get("pi_sigma") is not None:
+            argv += ["--pi-sigma", str(float(train.get("pi_sigma")))]
+        if bool(train.get("expand_types_by_level", False)):
+            argv += ["--expand-types-by-level"]
         if train.get("warm_start"):
             argv += ["--warm-start", str(Path(train["warm_start"]))]
         try:

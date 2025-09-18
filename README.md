@@ -100,6 +100,90 @@ Example:
 python -m torpedocode.bench.benchmark --levels 10 --T 5000 --batch 256 --window-s 5 --stride 5 --warmup 1 --env
 ```
 
+## Paper Pipeline (One-Click)
+
+This mirrors the paper’s end-to-end protocol: cache → topology selection → train (with PH) → evaluate/aggregate → economic checks.
+
+1) Cache raw feeds (NDJSON/JSONL or ITCH/OUCH/LOBSTER) with labels
+
+```
+python -m torpedocode.cli.cache \
+  --input ./data/ndjson_or_dir \
+  --cache-root ./cache \
+  --instrument AAPL \
+  --drop-auctions --tick-size 0.01 --levels 10 \
+  --horizons-s 1 5 10 --horizons-events 100 500 --eta 0.0
+```
+
+2) Select a topology configuration on validation (optional but recommended)
+
+```
+python -m torpedocode.cli.topo_search \
+  --cache-root ./cache --instrument AAPL --label-key instability_s_5 \
+  --artifact-dir ./artifacts/topo/AAPL --strict-tda
+# writes ./artifacts/topo/AAPL/topology_selected.json
+```
+
+3) Run the manifest pipeline (caches → batch train → aggregate)
+
+Create `paper_manifest.yaml`:
+
+```
+data:
+  input: ./cache                 # points at cached parquet(s) directory
+  cache_root: ./cache
+  instrument: AAPL               # or omit when using multiple caches per-file
+  drop_auctions: true
+  tick_size: 0.01
+  levels: 10
+  horizons_s: [1, 5, 10]
+  horizons_events: [100, 500]
+  eta: 0.0
+
+train:
+  artifact_root: ./artifacts
+  label_key: instability_s_5
+  epochs: 3
+  batch: 128
+  bptt: 64
+  topo_stride: 5
+  device: cpu
+  temperature_scale: true
+  tpp_diagnostics: true
+  # Topology options forwarded to batch_train:
+  use_topo_selected: true        # reuse topology_selected.json if present under artifacts/topo/<inst>/
+  # Alternatively, reference an explicit JSON:
+  # topology_json: ./artifacts/topo/AAPL/topology_selected.json
+  # Optional persistence image tweaks:
+  # pi_res: 128
+  # pi_sigma: 0.05
+
+aggregate:
+  mode: pred
+  output: ./artifacts/aggregate.json
+  block_bootstrap: true
+  block_length: 50
+  n_boot: 200
+```
+
+Run it:
+
+```
+python -m torpedocode.cli.manifest --manifest paper_manifest.yaml
+```
+
+4) Economic significance (VaR/ES, Kupiec/Christoffersen) for a given instrument
+
+```
+python -m torpedocode.cli.economic \
+  --input ./artifacts/AAPL/instability_s_5/predictions_test.csv \
+  --bootstrap-ci --threshold-sweep --alpha 0.99
+```
+
+Notes:
+- The manifest now forwards topology parameters to `batch_train.py` (`use_topo_selected`, `topology_json`, `pi_res`, `pi_sigma`).
+- Training writes TPP arrays and diagnostics (`tpp_test_arrays.npz`, `tpp_test_diagnostics.json`), including per‑type KS p‑values.
+
 ## Topology grid (largest_cc)
 
 - Run a small topology grid search on validation with the largest connected component rule for VR epsilon:
@@ -212,6 +296,51 @@ Manual quick commands (if you prefer)
 - Topological controls
   - `TopologyConfig` adds:
     - `vr_zscore` (default True) to z-score features per window for VR complexes.
+
+## Run Wizard Step-by-Step
+
+- Launch: `uv run python scripts/run_wizard.py`
+- The wizard guides you through:
+  - Environment check and optional native builds (Rust panel, Torch C++/CUDA op, C++ fast_eval)
+  - Data choice: Binance/Coinbase, LOBSTER CSVs, or ITCH/OUCH
+  - Harmonize & cache into Parquet
+  - Optional: Topology grid search on a validation slice
+  - Optional: CTMC pretrain (synthetic) and warm‑start training
+  - Train multi‑horizon hybrid (CPU/GPU)
+  - Fast eval + DeLong where available (writes `eval_fast.json`)
+  - Optional: Aggregate across instruments
+
+Notes
+- The wizard will prompt for device and paths; defaults are shown in brackets.
+- CTMC pretraining produces a checkpoint and threads it into training automatically.
+- You can re‑run the wizard at any time; it will detect available artifacts.
+
+### Save Checkpoints for Reproducibility
+
+- Save weights from the simple train CLI:
+
+```
+python -m torpedocode.cli.train \
+  --instrument AAPL \
+  --label-key instability_s_5 \
+  --artifact-dir ./artifacts/AAPL/instability_s_5 \
+  --epochs 3 --batch 128 --bptt 64 --device cpu \
+  --save-state-dict ./artifacts/AAPL/model.pt
+```
+
+- Pretrain + warm‑start:
+
+```
+python -m torpedocode.cli.pretrain_ctmc \
+  --epochs 3 --steps 400 --batch 64 --T 128 --hidden 128 --layers 1 \
+  --device cpu --output ./artifacts/pretrained/model.pt
+
+python -m torpedocode.cli.train_multi \
+  --cache-root ./cache \
+  --artifact-root ./artifacts \
+  --epochs 3 --device cpu \
+  --warm-start ./artifacts/pretrained/model.pt
+```
 
 ## Methodology Coverage
 

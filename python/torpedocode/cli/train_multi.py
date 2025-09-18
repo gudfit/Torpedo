@@ -36,6 +36,7 @@ def main():
     ap.add_argument("--include-market-embedding", action="store_true")
     ap.add_argument("--topology-json", type=Path, default=None)
     ap.add_argument("--use-topo-selected", action="store_true")
+    ap.add_argument("--warm-start", type=Path, default=None, help="Checkpoint to warm-start all runs")
     args = ap.parse_args()
 
     labels = ["instability_s_1", "instability_s_5", "instability_s_10", "instability_e_100", "instability_e_500"]
@@ -75,6 +76,8 @@ def main():
         argv += ["--topology-json", str(args.topology_json)]
     if args.use_topo_selected:
         argv.append("--use-topo-selected")
+    if args.warm_start is not None:
+        argv += ["--warm-start", str(args.warm_start)]
     if args.instruments:
         argv += ["--instruments", *args.instruments]
     if args.temperature_scale:

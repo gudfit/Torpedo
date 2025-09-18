@@ -232,6 +232,12 @@ def main():
         "--warm-start", type=Path, default=None, help="Optional checkpoint (.pt) to warm-start"
     )
     ap.add_argument(
+        "--save-state-dict",
+        type=Path,
+        default=None,
+        help="Optional path to save the final model state_dict for reproducibility",
+    )
+    ap.add_argument(
         "--expand-types-by-level",
         action="store_true",
         help="Expand LO/CX event types by level when a 'level' column exists",
@@ -493,6 +499,17 @@ def main():
                 header="idx,pred,label",
                 comments="",
             )
+
+    # Optionally persist final model weights for exact reproducibility
+    try:
+        if args.save_state_dict is not None:
+            path = Path(args.save_state_dict)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            import torch as _torch
+
+            _torch.save(model.state_dict(), path)
+    except Exception:
+        pass
 
     try:
         meta = {

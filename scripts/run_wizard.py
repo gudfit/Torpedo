@@ -181,6 +181,48 @@ def build_native_step():
                         f.write(base_cmd + "\n")
                 os.chmod(train_sh, 0o755)
                 print(f"[wizard] Wrote {train_sh}")
+                
+
+def maybe_ctmc_pretrain() -> Path | None:
+    """Interactive CTMC pretrain step returning a checkpoint path if created."""
+    if not yesno("Pretrain on synthetic CTMC and warm-start?", default=False):
+        return None
+    out = Path(prompt("CTMC checkpoint path", default="./artifacts/pretrained/model.pt")).resolve()
+    epochs = prompt("CTMC epochs", default="3").strip() or "3"
+    steps = prompt("CTMC steps/epoch", default="400").strip() or "400"
+    batch = prompt("CTMC batch", default="64").strip() or "64"
+    Tseq = prompt("CTMC events/sequence T", default="128").strip() or "128"
+    hidden = prompt("Hidden size", default="128").strip() or "128"
+    layers = prompt("LSTM layers", default="1").strip() or "1"
+    dev_default = "cuda" if _torch_cuda_available() else "cpu"
+    device = prompt("Device for CTMC pretrain [cpu/cuda]", default=dev_default)
+    cmd = [
+        sys.executable,
+        "-m",
+        "torpedocode.cli.pretrain_ctmc",
+        "--epochs",
+        epochs,
+        "--steps",
+        steps,
+        "--batch",
+        batch,
+        "--T",
+        Tseq,
+        "--hidden",
+        hidden,
+        "--layers",
+        layers,
+        "--device",
+        device,
+        "--output",
+        str(out),
+    ]
+    code = run(cmd)
+    if code != 0:
+        print("[wizard] CTMC pretrain failed; continuing without warm-start.")
+        return None
+    print(f"[wizard] CTMC checkpoint saved → {out}")
+    return out
 
 
 def _torch_cuda_available() -> bool:
@@ -598,6 +640,7 @@ def option_crypto(cache_root: Path):
         art = Path(prompt("Artifact root", default="./artifacts")).resolve()
         dev_default = "cuda" if _torch_cuda_available() else "cpu"
         device = prompt("Device [cpu/cuda]", default=dev_default)
+        warm = maybe_ctmc_pretrain()
         cmd = [
             sys.executable,
             "-m",
@@ -613,6 +656,8 @@ def option_crypto(cache_root: Path):
         ]
         if _topology_selected_exists(symbol, art):
             cmd.append("--use-topo-selected")
+        if warm is not None:
+            cmd += ["--warm-start", str(warm)]
         run(cmd)
         if yesno("Run fast eval on saved predictions?", default=True):
             fast_eval_predictions(art, symbol)
@@ -685,6 +730,7 @@ def option_lobster(cache_root: Path):
         art = Path(prompt("Artifact root", default="./artifacts")).resolve()
         dev_default = "cuda" if _torch_cuda_available() else "cpu"
         device = prompt("Device [cpu/cuda]", default=dev_default)
+        warm = maybe_ctmc_pretrain()
         cmd = [
             sys.executable,
             "-m",
@@ -700,6 +746,8 @@ def option_lobster(cache_root: Path):
         ]
         if _topology_selected_exists(symbol, art):
             cmd.append("--use-topo-selected")
+        if warm is not None:
+            cmd += ["--warm-start", str(warm)]
         run(cmd)
         if yesno("Run fast eval on saved predictions?", default=True):
             fast_eval_predictions(art, symbol)
@@ -755,6 +803,7 @@ def option_itch_ouch(cache_root: Path):
         art = Path(prompt("Artifact root", default="./artifacts")).resolve()
         dev_default = "cuda" if _torch_cuda_available() else "cpu"
         device = prompt("Device [cpu/cuda]", default=dev_default)
+        warm = maybe_ctmc_pretrain()
         cmd = [
             sys.executable,
             "-m",
@@ -770,6 +819,8 @@ def option_itch_ouch(cache_root: Path):
         ]
         if _topology_selected_exists(symbol, art):
             cmd.append("--use-topo-selected")
+        if warm is not None:
+            cmd += ["--warm-start", str(warm)]
         run(cmd)
         if yesno("Run fast eval on saved predictions?", default=True):
             fast_eval_predictions(art, symbol)
@@ -785,8 +836,10 @@ def main():
     print("  1) Acquire data (download/convert)")
     print("  2) Harmonize & cache (canonical parquet)")
     print("  3) Optional: Topology grid search (validation)")
-    print("  4) Train multi-horizon hybrid (CPU)")
-    print("  5) Evaluate & export artifacts")
+    print("  4) Optional: CTMC pretrain (warm-start)")
+    print("  5) Train multi-horizon hybrid (CPU/GPU)")
+    print("  6) Fast eval + DeLong where available")
+    print("  7) Optional: Aggregate across instruments")
     print("Select data option:")
     print("  1) Free crypto (Binance/Coinbase)")
     print("  2) LOBSTER CSVs (equities)")

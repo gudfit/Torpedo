@@ -7,10 +7,16 @@ from typing import Optional, Dict
 import json
 import numpy as np
 
-from .metrics import compute_point_process_diagnostics, delong_ci_auroc
+from .metrics import (
+    compute_point_process_diagnostics,
+    delong_ci_auroc,
+    ks_statistic as _ks_statistic,
+    kolmogorov_pvalue as _ks_pvalue,
+)
 from .tpp import (
     TPPArrays,
     rescaled_times,
+    rescaled_times_per_type,
     model_and_empirical_frequencies,
     nll_per_event_from_arrays,
 )
@@ -62,10 +68,25 @@ def save_tpp_arrays_and_diagnostics(
     diag_pp = compute_point_process_diagnostics(
         xi, empirical_frequencies=emp, model_frequencies=mod
     )
+    # Per-type KS p-values via time-rescaling (Uniform[0,1] check)
+    per_type_ks: dict[str, float] = {}
+    try:
+        xi_types = rescaled_times_per_type(arr)
+        for m, x in xi_types.items():
+            if x.size == 0:
+                per_type_ks[str(int(m))] = float("nan")
+                continue
+            u = 1.0 - np.exp(-np.asarray(x, dtype=float))
+            ks = _ks_statistic(u)
+            pv = _ks_pvalue(ks, int(u.size))
+            per_type_ks[str(int(m))] = float(pv)
+    except Exception:
+        per_type_ks = {}
     diag = {
         "nll_per_event": float(nll_evt),
         "ks_p_value": float(diag_pp.ks_p_value),
         "coverage_error": float(diag_pp.coverage_error),
+        "ks_p_value_per_type": per_type_ks,
     }
     with open(out_dir / "tpp_test_diagnostics.json", "w") as f:
         json.dump(diag, f, indent=2)
