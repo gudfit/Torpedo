@@ -143,3 +143,11 @@ Topology selection and walk-forward
   batch/pooled/LOMO modes via `--topology-json`. The training CLIs honor this and persist the active topology schema.
 - For walk-forward validation, `train` supports `--folds K` to produce K sequential folds with cumulative train and split val/test windows. Artifacts per fold are saved under
   `<artifact-dir>/fold_i/`.
+
+Manual quick commands (if you prefer)
+- `. .venv/bin/activate`
+- `make build-rust`
+- `python -c "import torpedocode_tda, torpedocode_ingest; print('native OK')"`
+- `pytest -q`
+- `uv pip install pyarrow`
+- `make ci-regime-smoke`
