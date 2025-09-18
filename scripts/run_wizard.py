@@ -5,6 +5,16 @@ import os
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
+from typing import Iterable, List, Tuple
+
+try:
+    import requests  # type: ignore
+except Exception:
+    requests = None  # type: ignore
+try:
+    from tqdm import tqdm  # type: ignore
+except Exception:
+    tqdm = None  # type: ignore
 
 
 def prompt(msg: str, default: str | None = None) -> str:
@@ -64,10 +74,20 @@ def build_native_step():
         run([sys.executable, "scripts/build_native.py", "rust", "--verbose"])
     if yesno("Build Rust panel binary?", default=True):
         run([sys.executable, "scripts/build_native.py", "panel", "--verbose"])
-    if yesno("Build Torch C++ extension (CPU-only)?", default=False):
-        # Cache compiled extensions for speed
-        os.environ.setdefault("TORCH_EXTENSIONS_DIR", ".tmp/torch_extensions")
-        run([sys.executable, "scripts/build_native.py", "torch", "--verbose"])
+    # Torch extension build
+    has_cuda = _torch_cuda_available()
+    if has_cuda:
+        choice = prompt("Build Torch C++/CUDA extension? [cpu/cuda/skip]", default="cuda").lower()
+        if choice.startswith("cu"):
+            os.environ.setdefault("TORCH_EXTENSIONS_DIR", ".tmp/torch_extensions")
+            run([sys.executable, "scripts/build_native.py", "torch-cuda", "--verbose"])
+        elif choice.startswith("cp"):
+            os.environ.setdefault("TORCH_EXTENSIONS_DIR", ".tmp/torch_extensions")
+            run([sys.executable, "scripts/build_native.py", "torch", "--verbose"])
+    else:
+        if yesno("Build Torch C++ extension (CPU-only)?", default=False):
+            os.environ.setdefault("TORCH_EXTENSIONS_DIR", ".tmp/torch_extensions")
+            run([sys.executable, "scripts/build_native.py", "torch", "--verbose"])
 
 
 def _torch_cuda_available() -> bool:
@@ -141,33 +161,96 @@ def option_crypto(cache_root: Path):
     raw_dir.mkdir(parents=True, exist_ok=True)
 
     if source == "binance":
-        if yesno("Prep last N months automatically?", default=True):
+        def _binance_url(sym: str, year: int, month: int) -> str:
+            return f"https://data.binance.vision/data/spot/monthly/aggTrades/{sym}/{sym}-aggTrades-{year}-{month:02d}.zip"
+
+        def _head_available(sym: str, pairs: Iterable[Tuple[int, int]]) -> List[Tuple[int, int]]:
+            if requests is None:
+                print("[warn] requests not available; skipping availability check")
+                return list(pairs)
+            pairs_list = list(pairs)
+            bar = (tqdm(pairs_list, desc="check", leave=False) if tqdm is not None else pairs_list)
+            avail: List[Tuple[int, int]] = []
+            for yy, mm in bar:
+                url = _binance_url(sym, yy, mm)
+                try:
+                    r = requests.head(url, timeout=8)
+                    if r.status_code == 200:
+                        avail.append((yy, mm))
+                    else:
+                        print(f"[skip] {yy}-{mm:02d} not available (status {r.status_code})")
+                except Exception as e:
+                    print(f"[skip] {yy}-{mm:02d} head check failed: {e}")
+            return avail
+
+        if yesno("Prep last N complete months automatically?", default=True):
             try:
                 n = int(prompt("N months", default="3"))
             except Exception:
                 n = 3
-            # Simplified: same-year assumption for convenience path
+            # Compute last N completed months as (year, month) pairs, crossing year boundary if needed
             now = datetime.now(timezone.utc)
-            year = now.year
-            month = now.month
-            months = [month - i for i in range(n) if month - i >= 1]
-            if len(months) < n:
-                print("[note] Convenience path only handles same-year months; falling back to manual prompts.")
+            y = now.year
+            m = now.month - 1  # last completed month
+            pairs = []
+            for _ in range(n):
+                if m < 1:
+                    y -= 1
+                    m += 12
+                pairs.append((y, m))
+                m -= 1
+            # Group by year and download per-year to avoid 404 for non-existent months
+            out = raw_dir / f"binance_{symbol}.ndjson"
+            # Start with an empty file
+            try:
+                out.unlink(missing_ok=True)
+            except Exception:
+                pass
+            ok_any = False
+            from collections import defaultdict
+            # Preflight availability via HEAD checks
+            avail_pairs = _head_available(symbol, pairs)
+            if not avail_pairs:
+                print("[warn] no available months found; falling back to manual prompts.")
+            by_year = defaultdict(list)
+            for yy, mm in (avail_pairs or pairs):
+                by_year[yy].append(mm)
+            for yy, months in by_year.items():
+                months_sorted = sorted(months)
+                code = run([sys.executable, "scripts/download_binance_monthly.py", "--symbol", symbol, "--year", str(yy), "--months", *[str(mo) for mo in months_sorted], "--output", str(out)])
+                if code == 0:
+                    ok_any = True
+            if ok_any:
+                print("Downloaded Binance monthly data.")
+                goto_ingest = True
             else:
-                out = raw_dir / f"binance_{symbol}.ndjson"
-                code = run([sys.executable, "scripts/download_binance_monthly.py", "--symbol", symbol, "--year", str(year), "--months", *[str(m) for m in months], "--output", str(out)])
-                if code != 0:
-                    print("[warn] downloader failed; falling back to manual prompts")
-                else:
-                    print("Downloaded Binance monthly data.")
-                    # Proceed to ingest below
-                    goto_ingest = True
+                print("[warn] downloader failed; months may be unavailable yet. Falling back to manual prompts.")
         # Manual monthly prompt
         if yesno("Download Binance Vision monthly aggTrades?", default=False):
-            year = int(prompt("Year", default="2024"))
-            months = prompt("Months (space-separated)", default="6 7 8").split()
+            # Pre-fill defaults to last completed month trio
+            now = datetime.now(timezone.utc)
+            y = now.year
+            m = now.month - 1
+            if m < 1:
+                y -= 1
+                m += 12
+            default_months = " ".join(str(x) for x in [max(1, m-2), max(1, m-1), m])
+            year = int(prompt("Year", default=str(y)))
+            months = prompt("Months (space-separated)", default=default_months).split()
             out = raw_dir / f"binance_{symbol}.ndjson"
-            code = run([sys.executable, "scripts/download_binance_monthly.py", "--symbol", symbol, "--year", str(year), "--months", *months, "--output", str(out)])
+            # HEAD check and progress bar for manual months
+            try:
+                months_int = [int(m) for m in months]
+            except Exception:
+                months_int = [int(x) for x in months if str(x).isdigit()]
+            pairs = [(int(year), m) for m in months_int]
+            avail_pairs = pairs
+            if pairs:
+                avail_pairs = _head_available(symbol, pairs)
+                if not avail_pairs:
+                    print("[warn] none of the requested months appear available; attempting anyway.")
+            months_to_dl = [str(m) for (_, m) in (avail_pairs or pairs)]
+            code = run([sys.executable, "scripts/download_binance_monthly.py", "--symbol", symbol, "--year", str(year), "--months", *months_to_dl, "--output", str(out)])
             if code != 0:
                 print("[warn] downloader failed; falling back to manual JSONL path")
         else:

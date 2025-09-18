@@ -65,12 +65,18 @@ def main():
         mask_vol = rv > med
         for name, mask in ("calm", mask_calm), ("volatile", mask_vol):
             if np.any(mask):
-                m = compute_classification_metrics(p[mask], y[mask])
+                yy = y[mask]
+                mm = compute_classification_metrics(p[mask], yy)
+                # Avoid NaN AUROC in degenerate splits: fallback to 0.5 when a single class present
+                if np.all(yy == 0) or np.all(yy == 1):
+                    auroc = 0.5
+                else:
+                    auroc = float(mm.auroc)
                 out[name] = {
-                    "auroc": float(m.auroc),
-                    "auprc": float(m.auprc),
-                    "brier": float(m.brier),
-                    "ece": float(m.ece),
+                    "auroc": auroc,
+                    "auprc": float(mm.auprc),
+                    "brier": float(mm.brier),
+                    "ece": float(mm.ece),
                     "count": int(mask.sum()),
                 }
     if args.output is not None:

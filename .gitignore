@@ -29,6 +29,7 @@ logs/
 /rust/torpedocode-ingest/target/
 /rust/torpedocode-py/target/
 /rust/torpedocode-panel/target/
+/rust/torpedocode-tda/target/
 
 # C++ build artifacts
 /cpp/build/

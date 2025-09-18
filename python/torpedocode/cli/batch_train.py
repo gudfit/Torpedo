@@ -314,6 +314,12 @@ def main():
         )
         m = compute_classification_metrics(p, y)
         auc, lo, hi = delong_ci_auroc(p, y)
+        if not (np.isfinite(lo) and np.isfinite(hi)):
+            try:
+                from ..evaluation.metrics import bootstrap_ci_auroc as _bauc
+                auc, lo, hi = _bauc(p, y, n_boot=200)
+            except Exception:
+                pass
         out = {
             "auroc": auc,
             "auroc_ci": [lo, hi],

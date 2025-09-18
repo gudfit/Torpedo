@@ -207,6 +207,53 @@ def delong_test_auroc(
     return float(auc1 - auc2), z, p
 
 
+def bootstrap_ci_auroc(
+    predictions: np.ndarray,
+    labels: np.ndarray,
+    *,
+    alpha: float = 0.05,
+    n_boot: int = 200,
+    rng: np.random.Generator | None = None,
+) -> tuple[float, float, float]:
+    """Bootstrap CI for AUROC by resampling pairs (p, y) with replacement.
+
+    Returns (auc, lo, hi). Falls back gracefully when degenerate (single-class) samples occur.
+    """
+    p = np.asarray(predictions, dtype=float).reshape(-1)
+    y = np.asarray(labels, dtype=int).reshape(-1)
+    if p.size == 0 or y.size != p.size:
+        return float("nan"), float("nan"), float("nan")
+    # Point AUROC
+    try:
+        if _roc_auc_score is not None:
+            auc = float(_roc_auc_score(y, p))
+        else:
+            auc = _auroc_numpy(p, y)
+    except Exception:
+        auc = float("nan")
+    rng = rng or np.random.default_rng(0)
+    n = len(p)
+    samples = []
+    for _ in range(int(n_boot)):
+        idx = rng.integers(0, n, size=n)
+        pb = p[idx]
+        yb = y[idx]
+        if np.all(yb == 0) or np.all(yb == 1):
+            continue  # skip degenerate resample
+        try:
+            if _roc_auc_score is not None:
+                ab = float(_roc_auc_score(yb, pb))
+            else:
+                ab = _auroc_numpy(pb, yb)
+            samples.append(ab)
+        except Exception:
+            continue
+    if not samples:
+        return auc, float("nan"), float("nan")
+    lo_q, hi_q = alpha / 2.0, 1.0 - alpha / 2.0
+    return auc, float(np.quantile(samples, lo_q)), float(np.quantile(samples, hi_q))
+
+
 def bootstrap_confint_metric(
     values: np.ndarray,
     *,
@@ -476,6 +523,7 @@ __all__ = [
     "compute_point_process_diagnostics",
     "delong_ci_auroc",
     "delong_test_auroc",
+    "bootstrap_ci_auroc",
     "bootstrap_confint_metric",
     "micro_macro_average",
     "block_bootstrap_micro_ci",
