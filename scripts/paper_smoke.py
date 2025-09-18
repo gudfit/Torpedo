@@ -38,6 +38,12 @@ def make_cache(root: Path, inst: str, T: int = 120) -> None:
 
 
 def main() -> None:
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Paper smoke: quick end-to-end CPU/GPU check")
+    ap.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
+    args = ap.parse_args()
+
     here = Path.cwd()
     cache = here / "cache_smoke"
     art = here / "artifacts_smoke"
@@ -67,7 +73,7 @@ def main() -> None:
         "--epochs",
         "1",
         "--device",
-        "cpu",
+        str(args.device),
     ]
     print("$", " ".join(cmd))
     subprocess.check_call(cmd)
@@ -93,4 +99,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

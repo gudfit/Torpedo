@@ -14,6 +14,13 @@ import numpy as np
 
 from ..evaluation.metrics import compute_classification_metrics
 from ..evaluation.economic import realized_volatility
+import warnings
+
+try:  # suppress benign sklearn warnings when a split has one class
+    from sklearn.exceptions import UndefinedMetricWarning as _UMW  # type: ignore
+    warnings.filterwarnings("ignore", category=_UMW)
+except Exception:
+    pass
 
 
 def _load_csv(path: Path):
@@ -76,4 +83,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
