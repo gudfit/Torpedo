@@ -26,7 +26,7 @@ fn l2_distance_matrix(x: &Array2<f64>) -> Array2<f64> {
 }
 
 #[pyfunction]
-fn estimate_vr_epsilon<'py>(py: Python<'py>, x: PyReadonlyArray2<f64>, q: f64) -> PyResult<f64> {
+fn estimate_vr_epsilon<'py>(_py: Python<'py>, x: PyReadonlyArray2<f64>, q: f64) -> PyResult<f64> {
     let x = x.as_array();
     let n = x.nrows();
     if n <= 1 {
@@ -115,7 +115,7 @@ fn lcc_fraction(d: &Array2<f64>, eps: f64) -> f64 {
 }
 
 #[pyfunction]
-fn epsilon_for_lcc<'py>(py: Python<'py>, x: PyReadonlyArray2<f64>, threshold: f64) -> PyResult<f64> {
+fn epsilon_for_lcc<'py>(_py: Python<'py>, x: PyReadonlyArray2<f64>, threshold: f64) -> PyResult<f64> {
     let x = x.as_array();
     let n = x.nrows();
     if n <= 1 { return Ok(0.0); }
@@ -139,7 +139,7 @@ fn epsilon_for_lcc<'py>(py: Python<'py>, x: PyReadonlyArray2<f64>, threshold: f6
 }
 
 #[pymodule]
-fn torpedocode_tda(py: Python, m: &PyModule) -> PyResult<()> {
+fn torpedocode_tda(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(estimate_vr_epsilon, m)?)?;
     m.add_function(wrap_pyfunction!(epsilon_for_lcc, m)?)?;
     m.add_function(wrap_pyfunction!(queue_age_series, m)?)?;

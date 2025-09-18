@@ -1,0 +1,15 @@
+/root/Torpedo/rust/torpedocode-tda/target/release/deps/target_lexicon-eddbad2068ed31fb.d: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/data_model.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/host.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/parse_error.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/targets.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/triple.rs /root/Torpedo/rust/torpedocode-tda/target/release/build/target-lexicon-d620b7d4024a56a6/out/host.rs
+
+/root/Torpedo/rust/torpedocode-tda/target/release/deps/libtarget_lexicon-eddbad2068ed31fb.rlib: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/data_model.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/host.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/parse_error.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/targets.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/triple.rs /root/Torpedo/rust/torpedocode-tda/target/release/build/target-lexicon-d620b7d4024a56a6/out/host.rs
+
+/root/Torpedo/rust/torpedocode-tda/target/release/deps/libtarget_lexicon-eddbad2068ed31fb.rmeta: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/data_model.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/host.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/parse_error.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/targets.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/triple.rs /root/Torpedo/rust/torpedocode-tda/target/release/build/target-lexicon-d620b7d4024a56a6/out/host.rs
+
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/lib.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/data_model.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/host.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/parse_error.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/targets.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.12.16/src/triple.rs:
+/root/Torpedo/rust/torpedocode-tda/target/release/build/target-lexicon-d620b7d4024a56a6/out/host.rs:
+
+# env-dep:OUT_DIR=/root/Torpedo/rust/torpedocode-tda/target/release/build/target-lexicon-d620b7d4024a56a6/out
