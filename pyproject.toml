@@ -25,6 +25,7 @@ dev = [
     "ripser>=0.6; platform_system != 'Windows'",
     "persim>=0.3",
     "gudhi>=3.9; platform_system != 'Windows'",
+    "tqdm>=4.65",
 ]
 
 [tool.setuptools]

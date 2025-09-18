@@ -37,3 +37,7 @@ ci-regime-smoke: paper-smoke
 	  $(PYTHON) scripts/add_fake_returns.py --input $$f --output $$out; \
 	  $(PYTHON) -m torpedocode.cli.metrics_regime --input $$out --output $${out%.csv}.metrics.json; \
 	done
+
+.PHONY: wizard-deps
+wizard-deps:
+	UV_CACHE_DIR=.tmp/uv uv pip install tqdm
