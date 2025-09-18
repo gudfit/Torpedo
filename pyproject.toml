@@ -26,6 +26,7 @@ dev = [
     "persim>=0.3",
     "gudhi>=3.9; platform_system != 'Windows'",
     "tqdm>=4.65",
+    "shap>=0.48",
 ]
 
 [tool.setuptools]

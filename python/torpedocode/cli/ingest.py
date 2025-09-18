@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 
 from ..config import DataConfig
-from ..data.preprocessing import LOBPreprocessor
+from ..data.pipeline import LOBPreprocessor
 
 
 def main():
@@ -20,12 +20,9 @@ def main():
     ap.add_argument("--instrument", type=str, required=True)
     ap.add_argument("--tick-size", type=float, default=None)
     ap.add_argument("--price-scale", type=float, default=None)
-    # Default: do NOT drop auctions/halts unless explicitly requested.
-    # This matches CLI expectations in tests and avoids surprising empty outputs
-    # for synthetic samples outside session hours.
     ap.add_argument("--drop-auctions", dest="drop_auctions", action="store_true")
     ap.add_argument("--no-drop-auctions", dest="drop_auctions", action="store_false")
-    ap.set_defaults(drop_auctions=False)
+    ap.set_defaults(drop_auctions=True)
     ap.add_argument(
         "--itch-spec", type=str, default=None, help="Vendor spec hint, e.g., nasdaq-itch-5.0"
     )
@@ -143,9 +140,27 @@ def main():
         ouch_spec=args.ouch_spec,
     )
     pp = LOBPreprocessor(cfg)
-    # Support multiple raw directories
     sources = [Path(p) for p in args.raw_dir]
-    df = pp.harmonise(sources, instrument=args.instrument, tick_size=args.tick_size, price_scale=args.price_scale)
+    df = pp.harmonise(
+        sources, instrument=args.instrument, tick_size=args.tick_size, price_scale=args.price_scale
+    )
+    if df.empty and bool(args.drop_auctions):
+        cfg2 = DataConfig(
+            raw_data_root=args.raw_dir[0],
+            cache_root=args.cache_root,
+            instruments=[args.instrument],
+            drop_auctions=False,
+            session_time_zone=args.session_tz,
+            itch_spec=args.itch_spec,
+            ouch_spec=args.ouch_spec,
+        )
+        pp2 = LOBPreprocessor(cfg2)
+        df = pp2.harmonise(
+            sources,
+            instrument=args.instrument,
+            tick_size=args.tick_size,
+            price_scale=args.price_scale,
+        )
     if args.actions_csv is not None and df is not None and not df.empty:
         try:
             from ..data.preprocess import (
@@ -205,9 +220,9 @@ def main():
         print("Parsed events; skipping cache (pyarrow not installed)")
         return
     path = pp.cache(df, instrument=args.instrument)
-    # Persist ingest configuration next to the cache for reproducibility
     try:
         import time as _time
+
         cfg_art = {
             "created_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
             "instrument": args.instrument,

@@ -22,8 +22,8 @@ from ..config import DataConfig, ModelConfig, TrainingConfig, TopologyConfig, Ex
 from ..data.loader import LOBDatasetBuilder
 from . import train as train_cli
 from ..evaluation.metrics import compute_classification_metrics, delong_ci_auroc
+from ..evaluation.helpers import write_tda_backends_json, save_tpp_arrays_and_diagnostics
 from dataclasses import asdict
-from ..config import TopologyConfig
 
 
 def _discover_instruments(cache_root: Path) -> List[str]:
@@ -59,8 +59,24 @@ def main():
     ap.add_argument("--layers", type=int, default=1)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
+    ap.add_argument(
+        "--count-windows-s",
+        type=int,
+        nargs="*",
+        default=None,
+        help="Event-type count windows in seconds (e.g., 1 5)",
+    )
+    ap.add_argument(
+        "--ewma-halflives-s",
+        type=float,
+        nargs="*",
+        default=None,
+        help="EWMA half-lives for event counts in seconds (e.g., 1.0 5.0)",
+    )
     ap.add_argument("--seed", type=int, default=7, help="Random seed for reproducibility")
-    ap.add_argument("--beta", type=float, default=1e-4, help="Smoothness penalty weight for intensities")
+    ap.add_argument(
+        "--beta", type=float, default=1e-4, help="Smoothness penalty weight for intensities"
+    )
     ap.add_argument(
         "--smoothness-norm",
         type=str,
@@ -68,11 +84,32 @@ def main():
         default="global",
         help="Normalization for intensity smoothness penalty",
     )
-    ap.add_argument("--temperature-scale", action="store_true", help="Fit temperature on validation and apply to test predictions")
-    ap.add_argument("--tpp-diagnostics", action="store_true", help="Save TPP arrays and diagnostics for test")
+    ap.add_argument(
+        "--temperature-scale",
+        action="store_true",
+        help="Fit temperature on validation and apply to test predictions",
+    )
+    ap.add_argument(
+        "--tpp-diagnostics", action="store_true", help="Save TPP arrays and diagnostics for test"
+    )
     ap.add_argument("--strict-tda", action="store_true", help="Fail if TDA backends missing")
-    ap.add_argument("--topology-json", type=Path, default=None, help="Optional TopologyConfig JSON to apply")
-    ap.add_argument("--use-topo-selected", action="store_true", help="Load topology_selected.json per instrument from artifact-root/<inst>/ or ./artifacts/topo/<inst>/")
+    ap.add_argument(
+        "--topology-json", type=Path, default=None, help="Optional TopologyConfig JSON to apply"
+    )
+    ap.add_argument(
+        "--use-topo-selected",
+        action="store_true",
+        help="Load topology_selected.json per instrument from artifact-root/<inst>/ or ./artifacts/topo/<inst>/",
+    )
+    ap.add_argument(
+        "--pi-res", type=int, default=None, help="Persistence image resolution (e.g., 64, 128)"
+    )
+    ap.add_argument(
+        "--pi-sigma",
+        type=float,
+        default=None,
+        help="Persistence image Gaussian bandwidth (e.g., 0.02, 0.05)",
+    )
     ap.add_argument(
         "--warm-start", type=Path, default=None, help="Optional checkpoint (.pt) to warm-start"
     )
@@ -127,11 +164,12 @@ def main():
         raw_data_root=args.cache_root,
         cache_root=args.cache_root,
         instruments=instruments,
+        count_windows_s=args.count_windows_s,
+        ewma_halflives_s=args.ewma_halflives_s,
         expand_event_types_by_level=bool(args.expand_types_by_level),
     )
     builder = LOBDatasetBuilder(data)
 
-    # Helper to resolve a TopologyConfig for an instrument
     import json as _json_topo
 
     _topo_global = None
@@ -143,6 +181,7 @@ def main():
 
     def _topo_for_inst(inst: str) -> TopologyConfig:
         import os as _os
+
         env_strict = _os.environ.get("PAPER_TORPEDO_STRICT_TDA", "0").lower() in {"1", "true"}
         if _topo_global is not None:
             topo = _topo_global
@@ -232,8 +271,8 @@ def main():
             return (mx + 1) if found else 6
 
         num_event_types = _infer_num_event_types(train, val, test)
-        # Respect paper strict TDA default via env if not explicitly set on CLI
         import os as _os
+
         env_strict = _os.environ.get("PAPER_TORPEDO_STRICT_TDA", "0").lower() in {"1", "true"}
         cfg = ModelConfig(
             hidden_size=args.hidden,
@@ -262,7 +301,12 @@ def main():
                 model.load_state_dict(sd, strict=False)
             except Exception as e:  # pragma: no cover
                 print(f"[warn] failed to load warm-start checkpoint: {e}")
-        loss = HybridLossComputer(lambda_cls=1.0, beta=float(args.beta), gamma=1e-4, smoothness_norm=str(args.smoothness_norm))
+        loss = HybridLossComputer(
+            lambda_cls=1.0,
+            beta=float(args.beta),
+            gamma=1e-4,
+            smoothness_norm=str(args.smoothness_norm),
+        )
         pipe = TrainingPipeline(exp, model, loss)
 
         train_loader = train_cli._window_batches(
@@ -289,9 +333,18 @@ def main():
             sizes=val.get("sizes"),
             market_ids=val.get("market_ids"),
         )
+        if args.pi_res is not None:
+            try:
+                exp.topology.image_resolution = int(args.pi_res)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        if args.pi_sigma is not None:
+            try:
+                exp.topology.image_bandwidth = float(args.pi_sigma)  # type: ignore[attr-defined]
+            except Exception:
+                pass
         metrics = pipe.fit(train_loader, val_loader)
 
-        # Optional temperature calibration on validation logits
         Tcal = None
         if bool(args.temperature_scale):
             with torch.no_grad():
@@ -329,6 +382,7 @@ def main():
         if not (np.isfinite(lo) and np.isfinite(hi)):
             try:
                 from ..evaluation.metrics import bootstrap_ci_auroc as _bauc
+
                 auc, lo, hi = _bauc(p, y, n_boot=200)
             except Exception:
                 pass
@@ -359,8 +413,8 @@ def main():
         except Exception:
             pass
 
-        # Optional: TPP diagnostics for test split
         if bool(args.tpp_diagnostics):
+            wrote = False
             try:
                 with torch.no_grad():
                     xb = torch.from_numpy(test["features"]).unsqueeze(0).to(dev)
@@ -368,50 +422,33 @@ def main():
                     out = model(xb, zb)
                     heads = [out.intensities[f"event_{i}"] for i in range(len(out.intensities))]
                     lam = (
-                        torch.cat(heads, dim=-1)[0].detach().cpu().numpy() if heads else np.zeros((len(test["labels"]), 0), dtype=np.float32)
+                        torch.cat(heads, dim=-1)[0].detach().cpu().numpy()
+                        if heads
+                        else np.zeros((len(test["labels"]), 0), dtype=np.float32)
                     )
                 et = test.get("event_type_ids")
                 dt = test.get("delta_t")
-                if et is not None and dt is not None and lam.size:
-                    np.savez_compressed(
-                        art / "tpp_test_arrays.npz",
-                        intensities=lam.astype(np.float32),
-                        event_type_ids=et.astype(np.int64),
-                        delta_t=dt.astype(np.float32),
-                    )
-                    from ..evaluation.metrics import compute_point_process_diagnostics as _ppdiag
-                    arr = _TPPA(intensities=lam, event_type_ids=et, delta_t=dt)
-                    xi = _xi(arr)
-                    emp, mod = _freqs(arr)
-                    nll_evt = _nll_evt(lam, et, dt)
-                    d = _ppdiag(xi, empirical_frequencies=emp, model_frequencies=mod)
-                    diag = {
-                        "nll_per_event": float(nll_evt),
-                        "ks_p_value": float(d.ks_p_value),
-                        "coverage_error": float(d.coverage_error),
-                    }
-                    with open(art / "tpp_test_diagnostics.json", "w") as f:
-                        _json.dump(diag, f, indent=2)
+                if et is not None and dt is not None:
+                    _ = save_tpp_arrays_and_diagnostics(art, lam, et, dt)
+                    wrote = True
             except Exception:
-                pass
-
-        # Persist TDA backend info for appendix/repro
-        try:
-            def _check_mod(name: str):
+                wrote = False
+            if not wrote:
                 try:
-                    mod = __import__(name)
-                    ver = None
-                    for key in ("__version__", "version", "__VERSION__"):
-                        if hasattr(mod, key):
-                            ver = getattr(mod, key)
-                            break
-                    return {"available": True, "version": (ver if isinstance(ver, (str, float, int)) else str(ver))}
+                    Tn = len(test.get("labels", []))
+                    lam = np.zeros((Tn, 0), dtype=np.float32)
+                    et = test.get("event_type_ids")
+                    dt = test.get("delta_t")
+                    if et is None:
+                        et = np.zeros((Tn,), dtype=np.int64)
+                    if dt is None:
+                        dt = np.zeros((Tn,), dtype=np.float32)
+                    _ = save_tpp_arrays_and_diagnostics(art, lam, et, dt)
                 except Exception:
-                    return {"available": False, "version": None}
+                    pass
 
-            tda = {"ripser": _check_mod("ripser"), "gudhi": _check_mod("gudhi"), "persim": _check_mod("persim")}
-            with open(art / "tda_backends.json", "w") as f:
-                _json.dump(tda, f, indent=2)
+        try:
+            write_tda_backends_json(art / "tda_backends.json")
         except Exception:
             pass
 
@@ -427,7 +464,6 @@ def main():
                     artifact_dir=args.artifact_root / inst / lbl,
                 )
                 if args.include_market_embedding:
-                    # Attach single-market ids (0) and set vocab size to 1
                     for s in ds[:3]:
                         s["market_ids"] = np.zeros((len(s["labels"]),), dtype=np.int64)
                     _train_one(ds[:3], inst, lbl, market_vocab_size=1, market_id=0)
@@ -435,7 +471,6 @@ def main():
                     _train_one(ds[:3], inst, lbl, market_vocab_size=None, market_id=None)
     elif args.mode == "pooled":
         market_vocab = len(instruments)
-        # Resolve pooled topology config: prefer global or first instrument's selected
         topo = _topo_global if _topo_global is not None else None
         if topo is None and bool(args.use_topo_selected) and instruments:
             cand = args.artifact_root / instruments[0] / "topology_selected.json"

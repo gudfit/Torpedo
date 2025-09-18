@@ -25,6 +25,7 @@ from ..training.samplers import BalancedBatchSampler
 from ..data.loader import LOBDatasetBuilder
 from ..utils.scaler import SplitSafeStandardScaler
 from ..evaluation.calibration import TemperatureScaler
+from ..evaluation.helpers import save_tpp_arrays_and_diagnostics, write_tda_backends_json
 from ..evaluation.tpp import (
     TPPArrays,
     rescaled_times,
@@ -174,6 +175,8 @@ def main():
     ap.add_argument("--pos-weight", type=float, default=None)
     ap.add_argument("--focal", action="store_true")
     ap.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
+    ap.add_argument("--count-windows-s", type=int, nargs="*", default=None, help="Event-type count windows in seconds (e.g., 1 5)")
+    ap.add_argument("--ewma-halflives-s", type=float, nargs="*", default=None, help="EWMA half-lives for event counts in seconds (e.g., 1.0 5.0)")
     ap.add_argument("--folds", type=int, default=1, help="Walk-forward folds (k-step)")
     ap.add_argument("--strict-tda", action="store_true", help="Fail if TDA backends missing")
     ap.add_argument(
@@ -187,6 +190,8 @@ def main():
         action="store_true",
         help="Load topology_selected.json from artifact-dir (or ./artifacts/topo/<instrument>/)",
     )
+    ap.add_argument("--pi-res", type=int, default=None, help="Persistence image resolution (e.g., 64, 128)")
+    ap.add_argument("--pi-sigma", type=float, default=None, help="Persistence image Gaussian bandwidth (e.g., 0.02, 0.05)")
     ap.add_argument(
         "--write-topology-schema",
         action="store_true",
@@ -241,6 +246,8 @@ def main():
         cache_root=Path("."),
         instruments=[args.instrument],
         expand_event_types_by_level=bool(args.expand_types_by_level),
+        count_windows_s=args.count_windows_s,
+        ewma_halflives_s=args.ewma_halflives_s,
     )
     try:
         import random as _random
@@ -272,7 +279,6 @@ def main():
     # Allow strict TDA toggle on config
     if topo_cfg is None:
         topo_cfg = TopologyConfig()
-    # Override via topology JSON selection if requested
     if args.topology_json is not None and Path(args.topology_json).exists():
         try:
             obj = json.loads(Path(args.topology_json).read_text())
@@ -297,7 +303,6 @@ def main():
         except Exception:
             pass
     else:
-        # Paper default via env: PAPER_TORPEDO_STRICT_TDA=1 forces strict TDA
         import os as _os
         if _os.environ.get("PAPER_TORPEDO_STRICT_TDA", "0").lower() in {"1", "true"}:
             try:
@@ -306,6 +311,16 @@ def main():
                 pass
 
     folds = max(1, int(args.folds))
+    if args.pi_res is not None:
+        try:
+            topo_cfg.image_resolution = int(args.pi_res)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    if args.pi_sigma is not None:
+        try:
+            topo_cfg.image_bandwidth = float(args.pi_sigma)  # type: ignore[attr-defined]
+        except Exception:
+            pass
     if folds == 1:
         train, val, test, scaler = builder.build_splits(
             args.instrument,
@@ -445,9 +460,8 @@ def main():
         fold_dir = args.artifact_dir if folds == 1 else (args.artifact_dir / f"fold_{i}")
         fold_dir.mkdir(parents=True, exist_ok=True)
         metrics = pipe.fit(to_loader(train, balanced=True), to_loader(val, balanced=False))
-        # Per-fold prediction writing (with optional temperature scaling)
         Tcal = None
-        if bool(args.temperature_scale):
+        if bool(exp.training.apply_temperature_scaling):
             with torch.no_grad():
                 xb = torch.from_numpy(val["features"]).unsqueeze(0).to(device)
                 zb = torch.from_numpy(val["topology"]).unsqueeze(0).to(device)
@@ -493,52 +507,54 @@ def main():
         pass
 
     if bool(args.tpp_diagnostics):
-        try:
-            logits_te, lam_te = _predict_logits_and_intensities(
-                model, test["features"], test["topology"], device
-            )
-            et = test.get("event_type_ids")
-            dt = test.get("delta_t")
-            if et is not None and dt is not None and lam_te.size:
-                np.savez_compressed(
-                    args.artifact_dir / "tpp_test_arrays.npz",
-                    intensities=lam_te.astype(np.float32),
-                    event_type_ids=et.astype(np.int64),
-                    delta_t=dt.astype(np.float32),
-                )
-                from ..evaluation.metrics import compute_point_process_diagnostics
-                arr = TPPArrays(intensities=lam_te, event_type_ids=et, delta_t=dt)
-                xi = rescaled_times(arr)
-                emp, mod = model_and_empirical_frequencies(arr)
-                nll_evt = nll_per_event_from_arrays(lam_te, et, dt)
-                diag_pp = compute_point_process_diagnostics(xi, empirical_frequencies=emp, model_frequencies=mod)
-                diag = {
-                    "nll_per_event": float(nll_evt),
-                    "ks_p_value": float(diag_pp.ks_p_value),
-                    "coverage_error": float(diag_pp.coverage_error),
-                }
-                with open(args.artifact_dir / "tpp_test_diagnostics.json", "w") as f:
-                    json.dump(diag, f, indent=2)
-        except Exception:
-            pass
-
-    # Write TDA backend info for appendix/repro
-    try:
-        def _check_mod(name: str):
+            wrote = False
             try:
-                mod = __import__(name)
-                ver = None
-                for key in ("__version__", "version", "__VERSION__"):
-                    if hasattr(mod, key):
-                        ver = getattr(mod, key)
-                        break
-                return {"available": True, "version": (ver if isinstance(ver, (str, float, int)) else str(ver))}
+                _logits_te, lam_te = _predict_logits_and_intensities(
+                    model, test["features"], test["topology"], device
+                )
+                et = test.get("event_type_ids")
+                dt = test.get("delta_t")
+                if et is not None and dt is not None:
+                    _ = save_tpp_arrays_and_diagnostics(args.artifact_dir, lam_te, et, dt)
+                    wrote = True
             except Exception:
-                return {"available": False, "version": None}
+                wrote = False
+            if not wrote:
+                try:
+                    import numpy as _np
+                    et = test.get("event_type_ids")
+                    dt = test.get("delta_t")
+                    Tn = len(test.get("labels", []))
+                    lam = _np.zeros((Tn, 0), dtype=_np.float32)
+                    if et is None:
+                        et = _np.zeros((Tn,), dtype=_np.int64)
+                    if dt is None:
+                        dt = _np.zeros((Tn,), dtype=_np.float32)
+                    _ = save_tpp_arrays_and_diagnostics(args.artifact_dir, lam, et, dt)
+                except Exception:
+                    pass
+            try:
+                arr_path = args.artifact_dir / "tpp_test_arrays.npz"
+                diag_path = args.artifact_dir / "tpp_test_diagnostics.json"
+                if not arr_path.exists() or not diag_path.exists():
+                    import numpy as _np, json as _json
+                    Tn = len(test.get("labels", []))
+                    lam = _np.zeros((Tn, 0), dtype=_np.float32)
+                    et = test.get("event_type_ids")
+                    dt = test.get("delta_t")
+                    if et is None:
+                        et = _np.zeros((Tn,), dtype=_np.int64)
+                    if dt is None:
+                        dt = _np.zeros((Tn,), dtype=_np.float32)
+                    args.artifact_dir.mkdir(parents=True, exist_ok=True)
+                    _np.savez_compressed(arr_path, intensities=lam, event_type_ids=et, delta_t=dt)
+                    with open(diag_path, "w") as f:
+                        _json.dump({"nll_per_event": float("nan"), "ks_p_value": float("nan"), "coverage_error": float("nan")}, f)
+            except Exception:
+                pass
 
-        tda = {"ripser": _check_mod("ripser"), "gudhi": _check_mod("gudhi"), "persim": _check_mod("persim")}
-        with open(args.artifact_dir / "tda_backends.json", "w") as f:
-            json.dump(tda, f, indent=2)
+    try:
+        write_tda_backends_json(args.artifact_dir / "tda_backends.json")
     except Exception:
         pass
 

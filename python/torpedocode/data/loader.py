@@ -61,7 +61,19 @@ class LOBDatasetBuilder:
 
         mdl = MarketDataLoader(self.config)
         df = mdl.load_events(instrument)
-        base, aux = build_lob_feature_matrix(df, levels=self.config.levels)
+        count_windows = None
+        if getattr(self.config, "count_windows_s", None) is not None:
+            import pandas as _pd
+            count_windows = tuple(_pd.to_timedelta(int(s), unit="s") for s in self.config.count_windows_s)
+        ewma_halflives = None
+        if getattr(self.config, "ewma_halflives_s", None) is not None:
+            ewma_halflives = tuple(float(x) for x in self.config.ewma_halflives_s)
+        base, aux = build_lob_feature_matrix(
+            df,
+            levels=self.config.levels,
+            count_windows=(count_windows if count_windows is not None else ()),
+            ewma_halflives=ewma_halflives,
+        )
         feats: List[np.ndarray] = [base]
         names: List[str] = [
             *(f"bsize_{i+1}" for i in range(self.config.levels)),
@@ -86,6 +98,9 @@ class LOBDatasetBuilder:
         add_block(aux.get("spreads", np.zeros((len(df),), dtype=np.float32)), "spread")
         add_block(aux.get("tod_sin", np.zeros((len(df),), dtype=np.float32)), "tod_sin")
         add_block(aux.get("tod_cos", np.zeros((len(df),), dtype=np.float32)), "tod_cos")
+        add_block(aux.get("tod_progress", np.zeros((len(df),), dtype=np.float32)), "tod_progress")
+        add_block(aux.get("dow_sin", np.zeros((len(df),), dtype=np.float32)), "dow_sin")
+        add_block(aux.get("dow_cos", np.zeros((len(df),), dtype=np.float32)), "dow_cos")
         qab = aux.get("queue_age_b", None)
         qaa = aux.get("queue_age_a", None)
         if isinstance(qab, np.ndarray) and qab.ndim == 2 and qab.shape[1] > 0:
@@ -179,12 +194,10 @@ class LOBDatasetBuilder:
         for i in range(k):
             v0 = base + i * seg
             t1 = base + (i + 1) * seg if i < k - 1 else T
-            # val half, test half within segment
             mid = v0 + max(1, (t1 - v0) // 2)
             train_idx = slice(0, v0)
             val_idx = slice(v0, mid)
             test_idx = slice(mid, t1)
-            # Build per-split using existing logic
             scaler = SplitSafeStandardScaler()
             X = rec["features_raw"]
             feature_names = rec["feature_names"].tolist()
@@ -218,7 +231,6 @@ class LOBDatasetBuilder:
             train = build(train_idx)
             val = build(val_idx)
             test = build(test_idx)
-            # Optional: persist split indices per fold
             if artifact_dir is not None:
                 try:
                     ad = Path(artifact_dir) / f"fold_{i+1}"
@@ -260,7 +272,6 @@ class LOBDatasetBuilder:
 
         cfg = topology or TopologyConfig()
         topo_gen = TopologicalFeatureGenerator(cfg)
-        # If using images with auto-range, estimate ranges on the training split and freeze for val/test
         if (
             cfg.persistence_representation == "image"
             and bool(getattr(cfg, "image_auto_range", False))
@@ -334,7 +345,6 @@ class LOBDatasetBuilder:
 
             with open(ad / "feature_schema.json", "w") as f:
                 json.dump(schema, f, indent=2)
-            # Persist explicit deterministic split indices for reproducibility
             try:
                 splits_art = {
                     "train_idx": list(range(0, t0)),

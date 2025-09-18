@@ -38,6 +38,12 @@ pub struct CanonicalEvent {
     pub side: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct IngestChecks {
+    pub enforce_monotonic_timestamps: bool,
+    pub drop_corrupt_events: bool,
+}
+
 #[async_trait]
 pub trait SourceAdapter {
     async fn connect(&mut self) -> Result<(), IngestError>;
@@ -102,5 +108,28 @@ where
             count += 1;
         }
         Ok(count)
+    }
+    pub async fn run_with_checks(&mut self, checks: IngestChecks) -> Result<Vec<CanonicalEvent>, IngestError> {
+        self.source.connect().await?;
+        let mut stream = self.source.stream().await?;
+        let mut results = Vec::new();
+        let mut last_ts: Option<chrono::DateTime<chrono::Utc>> = None;
+        while let Some(event) = stream.next().await {
+            // Drop corrupt events if requested
+            if checks.drop_corrupt_events {
+                if !event.timestamp.timestamp_nanos_opt().is_some() {
+                    continue;
+                }
+            }
+            if checks.enforce_monotonic_timestamps {
+                if let Some(prev) = last_ts {
+                    if event.timestamp < prev { continue; }
+                }
+                last_ts = Some(event.timestamp);
+            }
+            let canonical = self.normaliser.normalise(event).await?;
+            results.push(canonical);
+        }
+        Ok(results)
     }
 }

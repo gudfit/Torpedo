@@ -17,26 +17,26 @@ from ..evaluation.economic import (
     christoffersen_independence_test,
     choose_threshold_by_utility,
     realized_volatility,
+    block_bootstrap_var_es,
 )
 from ..evaluation.metrics import compute_classification_metrics
+from ..evaluation.io import load_preds_labels_csv, load_preds_labels_npz
 
 
-def _load_csv(path: Path):
-    import pandas as pd
-
-    df = pd.read_csv(path)
-    p = df["pred"].to_numpy(dtype=float)
-    y = df["label"].astype(int).to_numpy()
-    r = df["ret"].to_numpy(dtype=float) if "ret" in df.columns else None
-    return p, y, r
-
-
-def _load_npz(path: Path):
-    obj = np.load(path, allow_pickle=False)
-    p = obj["pred"]
-    y = obj["label"]
-    r = obj["ret"] if "ret" in obj else None
-    return p, y, r
+def _threshold_sensitivity(p: np.ndarray, y: np.ndarray, *, grid: np.ndarray | None = None) -> dict:
+    grid = grid if grid is not None else np.linspace(0.05, 0.95, 19)
+    out = []
+    for t in grid:
+        yhat = (p >= t).astype(int)
+        tp = float(np.sum((yhat == 1) & (y == 1)))
+        fp = float(np.sum((yhat == 1) & (y == 0)))
+        fn = float(np.sum((yhat == 0) & (y == 1)))
+        tn = float(np.sum((yhat == 0) & (y == 0)))
+        prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = (2 * prec * rec) / (prec + rec) if (prec + rec) > 0 else 0.0
+        out.append({"threshold": float(t), "precision": prec, "recall": rec, "f1": f1})
+    return {"grid": out}
 
 
 def main():
@@ -61,6 +61,20 @@ def main():
     ap.add_argument("--w-neg", type=float, default=1.0)
     ap.add_argument("--output", type=Path, default=None)
     ap.add_argument(
+        "--bootstrap-ci",
+        action="store_true",
+        help="Report VaR/ES confidence intervals via stationary block bootstrap",
+    )
+    ap.add_argument("--boot-n", type=int, default=200, help="Bootstrap replicates for VaR/ES CIs")
+    ap.add_argument(
+        "--block-l", type=float, default=50.0, help="Expected block length for stationary bootstrap"
+    )
+    ap.add_argument(
+        "--threshold-sweep",
+        action="store_true",
+        help="Emit threshold sensitivity grid over validation or data",
+    )
+    ap.add_argument(
         "--threshold",
         type=float,
         default=None,
@@ -68,14 +82,23 @@ def main():
     )
     args = ap.parse_args()
 
-    p, y, r = _load_csv(args.input) if args.input is not None else _load_npz(args.npz)
+    if args.input is not None:
+        p, y, r, _p2 = load_preds_labels_csv(
+            args.input, pred_col="pred", label_col="label", ret_col="ret"
+        )
+    else:
+        p, y, r, _p2 = load_preds_labels_npz(
+            args.npz, pred_key="pred", label_key="label", ret_key="ret"
+        )
     pv = yv = None
     if args.val_input is not None:
-        pv, yv, _ = _load_csv(args.val_input)
+        pv, yv, _rv, _p2 = load_preds_labels_csv(
+            args.val_input, pred_col="pred", label_col="label", ret_col="ret"
+        )
     elif args.val_npz is not None:
-        obj = np.load(args.val_npz, allow_pickle=False)
-        pv = obj["pred"] if "pred" in obj else None
-        yv = obj["label"] if "label" in obj else None
+        pv, yv, _rv, _p2 = load_preds_labels_npz(
+            args.val_npz, pred_key="pred", label_key="label", ret_key="ret"
+        )
     out = {}
     if y is not None:
         m = compute_classification_metrics(p, y)
@@ -86,6 +109,14 @@ def main():
         kupiec = kupiec_pof_test(exceed, alpha=args.alpha)
         christ = christoffersen_independence_test(exceed)
         out.update({"VaR": var, "ES": es, "kupiec_p": kupiec, "christoffersen_p": christ})
+        if bool(args.bootstrap_ci):
+            ci = block_bootstrap_var_es(
+                r,
+                alpha=args.alpha,
+                expected_block_length=float(args.block_l),
+                n_boot=int(args.boot_n),
+            )
+            out.update({"VaR_CI": ci.get("var_ci"), "ES_CI": ci.get("es_ci")})
         rv = realized_volatility(r)
         med = float(np.median(rv))
         mask_low = rv <= med
@@ -105,6 +136,10 @@ def main():
         else:
             theta = float(np.median(p))
         out["threshold"] = float(theta)
+        if args.threshold_sweep and y is not None:
+            out["threshold_sensitivity"] = _threshold_sensitivity(p, y)
+    elif args.threshold_sweep and y is not None:
+        out["threshold_sensitivity"] = _threshold_sensitivity(p, y)
 
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)

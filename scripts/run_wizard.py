@@ -104,6 +104,17 @@ def build_native_step():
         if fb.exists():
             os.environ["FAST_EVAL_BIN"] = str(fb)
             print(f"[wizard] FAST_EVAL_BIN set for this session → {fb}")
+            # Offer to set OpenMP threads for this session now (or auto if env set)
+            if os.environ.get("WIZARD_OMP_AUTOCONFIG", "0").lower() in {"1", "true"}:
+                th = str(os.cpu_count() or 8)
+                os.environ["OMP_NUM_THREADS"] = th
+                print(f"[wizard] OMP_NUM_THREADS={th} (session, auto)")
+            else:
+                if yesno("Set OMP_NUM_THREADS for this session now?", default=True):
+                    cores = os.cpu_count() or 8
+                    th = prompt("OMP_NUM_THREADS", default=str(cores))
+                    os.environ["OMP_NUM_THREADS"] = str(th)
+                    print(f"[wizard] OMP_NUM_THREADS={th} (session)")
             if yesno(
                 "Write run_env.sh with FAST_EVAL_BIN and PAPER_TORPEDO_STRICT_TDA?", default=True
             ):
@@ -112,9 +123,14 @@ def build_native_step():
                     f.write("#!/usr/bin/env bash\n")
                     f.write(f'export FAST_EVAL_BIN="{fb}"\n')
                     f.write("export PAPER_TORPEDO_STRICT_TDA=1\n")
-                    if yesno("Set OMP_NUM_THREADS in run_env.sh?", default=False):
-                        th = prompt("OMP_NUM_THREADS", default="8")
+                    if os.environ.get("WIZARD_OMP_AUTOCONFIG", "0").lower() in {"1", "true"}:
+                        th = str(os.cpu_count() or 8)
                         f.write(f"export OMP_NUM_THREADS={th}\n")
+                    else:
+                        if yesno("Set OMP_NUM_THREADS in run_env.sh?", default=True):
+                            cores = os.cpu_count() or 8
+                            th = prompt("OMP_NUM_THREADS", default=str(cores))
+                            f.write(f"export OMP_NUM_THREADS={th}\n")
                 os.chmod(env_sh, 0o755)
                 print(f"[wizard] Wrote {env_sh}")
             if yesno("Generate train_cmd.sh with recommended flags?", default=True):
@@ -124,6 +140,8 @@ def build_native_step():
                     f.write("set -euo pipefail\n")
                     f.write(f'export FAST_EVAL_BIN="{fb}"\n')
                     f.write("export PAPER_TORPEDO_STRICT_TDA=1\n")
+                    cores = os.cpu_count() or 8
+                    f.write(f'export OMP_NUM_THREADS={cores}\n')
                     f.write(
                         "# Example: per-instrument training with LO/CX@level expansion and topology\n"
                     )
@@ -137,6 +155,30 @@ def build_native_step():
                     f.write(
                         'uv run python -m torpedocode.cli.train \\\n+--instrument "$INSTRUMENT" \\\n+--label-key "$LABEL_KEY" \\\n+--artifact-dir "$ARTIFACT_ROOT/$INSTRUMENT/$LABEL_KEY" \\\n+--epochs 3 --batch 128 --bptt 64 --topo-stride 5 --device cpu \\\n+--expand-types-by-level\n'
                     )
+                    f.write("\n# HOWTO: Count/EWMA options for event-type flow\n")
+                    f.write("#  - Add: --count-windows-s 1 5 10   to control causal count windows (seconds)\n")
+                    f.write("#  - Add: --ewma-halflives-s 1.0 5.0 to add exponentially decayed counts with half-lives (seconds)\n")
+                    f.write("#\n# HOWTO: Persistence image quick overrides\n")
+                    f.write("#  - Add: --pi-res 128  --pi-sigma 0.02   to match paper configs\n")
+                    # Optional interactive line with user-selected flags
+                    if yesno("Add a second command line with custom count/EWMA/PI flags?", default=False):
+                        base_cmd = (
+                            'uv run python -m torpedocode.cli.train \\\n+--instrument "$INSTRUMENT" \\\n+--label-key "$LABEL_KEY" \\\n+--artifact-dir "$ARTIFACT_ROOT/$INSTRUMENT/$LABEL_KEY" \\\n+--epochs 3 --batch 128 --bptt 64 --topo-stride 5 --device cpu \\\n+--expand-types-by-level'
+                        )
+                        cw = prompt("Count windows (seconds, space-separated)", default="1 5").strip()
+                        hl = prompt("EWMA half-lives (seconds, space-separated)", default="1.0 5.0").strip()
+                        res = prompt("PI resolution", default="128").strip()
+                        sig = prompt("PI sigma", default="0.02").strip()
+                        if cw:
+                            base_cmd += f" \\\n+--count-windows-s {cw}"
+                        if hl:
+                            base_cmd += f" \\\n+--ewma-halflives-s {hl}"
+                        if res:
+                            base_cmd += f" \\\n+--pi-res {res}"
+                        if sig:
+                            base_cmd += f" \\\n+--pi-sigma {sig}"
+                        f.write("\n# With wizard-chosen flags\n")
+                        f.write(base_cmd + "\n")
                 os.chmod(train_sh, 0o755)
                 print(f"[wizard] Wrote {train_sh}")
 
@@ -184,6 +226,7 @@ def fast_eval_predictions(artifact_root: Path, instrument: str) -> None:
     import shutil as _sh
 
     fast_eval_bin = os.environ.get("FAST_EVAL_BIN", "")
+    fast_eval_pr = os.environ.get("FAST_EVAL_PR_MODE", "").strip().lower()
     for f in bar:
         try:
             df = _pd.read_csv(f)
@@ -227,15 +270,16 @@ def fast_eval_predictions(artifact_root: Path, instrument: str) -> None:
                     except Exception as e:
                         print(f"[fast-eval] paired DeLong failed on {sib.name}: {e}")
             out = Path(f).with_name("eval_fast.json")
-            if (
-                fast_eval_bin
-                and _sh.which(fast_eval_bin)
-                and not any(
-                    Path(f).with_name(c).exists()
-                    for c in ("predictions_test_b.csv", "predictions_test_baseline.csv")
-                )
+            if fast_eval_bin and _sh.which(fast_eval_bin) and not any(
+                Path(f).with_name(c).exists()
+                for c in ("predictions_test_b.csv", "predictions_test_baseline.csv")
             ):
-                code = run([fast_eval_bin, f, str(out)])
+                cmd = [fast_eval_bin]
+                if fast_eval_pr in {"trap", "sklearn", "step"}:
+                    mode = "sklearn" if fast_eval_pr in {"sklearn", "step"} else "trap"
+                    cmd += ["--pr-mode", mode]
+                cmd += [f, str(out)]
+                code = run(cmd)
                 if code != 0:
                     out.write_text(_json.dumps(out_obj, indent=2))
             else:

@@ -60,7 +60,8 @@ def run_once(
         return {
             "ph_time": t1 - t0,
             "forward_time": float("nan"),
-            "events": T * B,
+            # Fallback path before batch tensorization; use provided batch argument
+            "events": T * int(batch),
             "feature_dim": Fdim,
             "topo_dim": Zdim,
         }

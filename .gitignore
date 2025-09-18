@@ -33,3 +33,4 @@ logs/
 
 # C++ build artifacts
 /cpp/build/
+bin/

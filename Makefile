@@ -8,6 +8,23 @@ test:
 test-uv:
 	UV_CACHE_DIR=.tmp/uv uv run -q pytest -q
 
+.PHONY: test-uv-perf
+test-uv-perf:
+	UV_CACHE_DIR=.tmp/uv bash scripts/run_tests_uv.sh --perf
+
+.PHONY: test-uv-cpu
+test-uv-cpu:
+	UV_CACHE_DIR=.tmp/uv bash scripts/run_tests_cpu.sh
+
+.PHONY: build-native
+build-native:
+	UV_CACHE_DIR=.tmp/uv uv run -q python scripts/build_native.py rust --verbose || true
+	UV_CACHE_DIR=.tmp/uv uv run -q python scripts/build_native.py lobster --verbose || true
+	UV_CACHE_DIR=.tmp/uv uv run -q python scripts/build_native.py panel --verbose || true
+
+.PHONY: ci-cpu
+ci-cpu: build-native test-uv-cpu
+
 smoke:
 	$(PYTHON) scripts/cpu_smoke.py
 

@@ -15,17 +15,23 @@ __global__ void fuse_features_kernel(const float *__restrict__ features,
                                      float *__restrict__ output,
                                      std::int64_t numel) {
   const auto idx = blockDim.x * blockIdx.x + threadIdx.x;
-  if (idx >= numel) return;
+  if (idx >= numel)
+    return;
   output[idx] = features[idx] + topo_aligned[idx];
 }
 
 } // namespace
 
 HybridForwardOutputs hybrid_forward_cuda(const HybridForwardInputs &inputs) {
+  TORCH_CHECK(inputs.features.dtype() == torch::kFloat32,
+              "features must be float32");
+  TORCH_CHECK(inputs.topology.dtype() == torch::kFloat32,
+              "topology must be float32");
   auto features = inputs.features.contiguous();
   auto topology = inputs.topology.contiguous();
 
-  // Align topology to features: if last-dim differs, mean-reduce over last dim then expand
+  // Align topology to features: if last-dim differs, mean-reduce over last dim
+  // then expand
   if (features.sizes() != topology.sizes()) {
     if (topology.dim() >= 1) {
       auto reduced = topology.mean(-1, /*keepdim=*/true);
@@ -38,10 +44,16 @@ HybridForwardOutputs hybrid_forward_cuda(const HybridForwardInputs &inputs) {
   const int threads = 256;
   const int blocks = (numel + threads - 1) / threads;
 
-  fuse_features_kernel<<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
-      features.data_ptr<float>(), topology.data_ptr<float>(), output.data_ptr<float>(), numel);
+  fuse_features_kernel<<<blocks, threads, 0,
+                         at::cuda::getCurrentCUDAStream()>>>(
+      features.data_ptr<float>(), topology.data_ptr<float>(),
+      output.data_ptr<float>(), numel);
+  TORCH_CHECK(cudaGetLastError() == cudaSuccess,
+              "fuse_features_kernel launch failed");
 
   if (inputs.weights.defined() && inputs.weights.numel() == numel) {
+    TORCH_CHECK(inputs.weights.dtype() == torch::kFloat32,
+                "weights must be float32 when provided");
     auto wv = inputs.weights.contiguous().view_as(output);
     output.mul_(wv);
   }

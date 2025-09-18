@@ -1,13 +1,13 @@
 # TorpedoCode
 
-CPU smoke testing with uv
+Quick start (CPU)
 
-- Create a local environment: `uv venv`
-- Install project (optionally with dev extras): `uv pip install -e '.[dev]'`
-- Run CPU smoke script: `uv run python scripts/cpu_smoke.py`
-- Run tests: `uv run pytest -q`
+- Create env: `uv venv`
+- Install: `uv pip install -e '.[dev]'`
+- Run smoke: `uv run python scripts/cpu_smoke.py`
+- Tests: `UV_CACHE_DIR=.tmp/uv uv run -q pytest -q`
 
-CUDA paths are optional and disabled by default; use `scripts/run_training.py --cuda` only when a CUDA toolchain is available.
+CUDA is optional; only enable if your toolchain supports it.
 
 ## Parsers, Preprocessing, and CLI
 
@@ -23,6 +23,7 @@ CUDA paths are optional and disabled by default; use `scripts/run_training.py --
     - `export LOBSTER_FAST_BIN=$PWD/cpp/lobster_fast`
   - Rust/pybind11 hooks stubbed in `python/torpedocode/data/native.py` (attempt to import `torpedocode_ingest` if available)
 - Directory ingestion CLI: `python -m torpedocode.cli.ingest --raw-dir RAW --cache-root CACHE --instrument SYMBOL [--tick-size TS]`
+  - Session filtering: By default, ingestion excludes auctions/halts using market local hours (09:30–16:00 America/New_York by default). If your data is outside session (e.g., midnight UTC in tests), pass `--no-drop-auctions`.
 
 ### Panel CLI (Rust)
 
@@ -74,6 +75,9 @@ CUDA paths are optional and disabled by default; use `scripts/run_training.py --
 - Expand directories to candidate files (NDJSON/JSONL, ITCH/OUCH, LOBSTER CSVs)
 - Auto-pair LOBSTER `...message_*.csv` with `...orderbook_*.csv`
 - Use native bindings when present; fallback to pure Python parsers
+
+Note: `torpedocode.data.preprocessing` is a shim that re‑exports `LOBPreprocessor` from
+`torpedocode.data.pipeline` to preserve backward compatibility with older imports.
 
 ## Optional knobs
 
@@ -171,6 +175,79 @@ Manual quick commands (if you prefer)
   - A progress bar via `tqdm` if installed (`pip install tqdm`).
   - Output JSON: `eval_fast.json` alongside `predictions_test.csv`.
   - Optional native path: set `FAST_EVAL_BIN` to point to a built C++ tool (`cpp/src/fast_eval.cpp`) to compute single‑model metrics quickly:
-    - `g++ -O3 -std=c++17 -o cpp/fast_eval cpp/src/fast_eval.cpp`
+    - `FAST_EVAL_OPENMP=1 uv run python scripts/build_native.py fast-eval` (enables `-fopenmp`)
     - `export FAST_EVAL_BIN=$PWD/cpp/fast_eval`
+    - `export OMP_NUM_THREADS=$(nproc)` (or desired threads)
     - Wizard will use it when no paired comparison is needed.
+
+### Wizard Run Env
+
+- The wizard can write `run_env.sh` exporting:
+  - `FAST_EVAL_BIN`, `PAPER_TORPEDO_STRICT_TDA=1`, and `OMP_NUM_THREADS` (defaults to CPU cores)
+- It can also generate `train_cmd.sh` exporting the same and running train with `--expand-types-by-level`.
+
+## New helpers and flags (methodology alignment)
+
+- Shared IO + helpers
+  - `torpedocode.evaluation.io`: `load_preds_labels_csv/npz` to avoid duplicate CSV/NPZ readers.
+  - `torpedocode.evaluation.helpers`:
+    - `write_tda_backends_json(path)`: writes availability/version for `ripser`, `gudhi`, `persim`.
+    - `save_tpp_arrays_and_diagnostics(dir, intensities, event_type_ids, delta_t)`: emits `tpp_test_arrays.npz` and `tpp_test_diagnostics.json`.
+    - `temperature_scale_from_probs(preds, labels)`: fits temperature on logits derived from probabilities and returns calibrated metrics.
+
+- Economic CLI (`python -m torpedocode.cli.economic`)
+  - New flag `--threshold-sweep` to emit threshold sensitivity (precision/recall/F1) over a default grid. Works with optional `--val-*` inputs.
+  - New flags `--bootstrap-ci --boot-n N --block-l L` to report VaR/ES confidence intervals via stationary block bootstrap.
+
+- Feature engineering controls
+  - `train.py` / `batch_train.py` accept:
+    - `--count-windows-s 1 5 ...` to control event-type count windows (seconds).
+    - `--ewma-halflives-s 1.0 5.0 ...` to add exponentially decayed event counts with given half-lives.
+  - Internally, `features.lob.build_lob_feature_matrix` now computes:
+    - Event-type counts per window and total.
+    - EWMA counts per type and total (time-aware via Δt), appended to the counts block.
+    - Additional temporal covariates: normalized time-of-day (`tod_progress`) and day-of-week (`dow_sin`, `dow_cos`).
+  - Queue ages: exact ages use `last_update_*` columns when present; fallback ages now incorporate event-aware resets for LO/CX at specific levels and MO± at best opposite side, reducing false positives versus pure change detection.
+
+- Topological controls
+  - `TopologyConfig` adds:
+    - `vr_zscore` (default True) to z-score features per window for VR complexes.
+
+## Methodology Coverage
+
+- Feature engineering (conventional)
+  - Implemented in `python/torpedocode/features/lob.py`:
+  - Depths and cumulative depths, multi‑scale imbalance, spreads/mid and returns, inter‑event time, event‑type counts and exponentially decayed counts, time‑of‑day and day‑of‑week cyclical encodings, and queue ages (with optional Rust fast paths). Event‑aware resets (LO/CX at their levels and MO± at best opposite side) reduce false positives for ages.
+
+- Topological features (TDA)
+  - Implemented in `python/torpedocode/features/topological.py` with `TopologyConfig`:
+  - Cubical complexity via a liquidity surface, Vietoris–Rips with optional per‑window z‑scoring; persistence landscapes and images; auto‑range for images; VR epsilon strategies (largest CC or MST quantile); strict/fallback toggles; stride/windowing.
+  - Grid selection and reproducibility: `python/torpedocode/cli/topo_search.py` searches windows and vectorisations; `cli/train.py` writes `feature_schema.json`, records the active topology config (and image ranges), and supports reusing a selected topology JSON.
+
+- Hybrid model architecture and loss
+  - Implemented in `python/torpedocode/models/hybrid.py` and `python/torpedocode/training/losses.py`:
+  - LSTM over concatenated `[x_t, z_t, e_mkt]`, per‑type intensity heads with softplus and topology skip, log‑normal mark head, and a classifier head.
+  - Exact TPP compensator using piecewise‑constant intensities, per‑event log λ(m_i) + compensator + log‑normal mark NLL. Smoothness penalty uses time differences. Weight decay is applied in the loss (optimizer `weight_decay=0.0` to avoid double‑counting; see `training/pipeline.py`).
+  - Calibration: ECE and Brier in `evaluation/metrics.py`. Optional temperature scaling via `cli/train.py` and `TrainingConfig.apply_temperature_scaling`.
+
+- Pretraining CTMC
+  - Implemented in `python/torpedocode/data/synthetic_ctmc.py` with Cont‑style queues, state‑dependent intensities, marks, optional topology, and per‑level event expansion (LO/CX; optional MO by level).
+  - CLI in `python/torpedocode/cli/pretrain_ctmc.py` trains a small model and saves a checkpoint. The generator remaps event types to the requested `--num-event-types` (e.g., 6 → keep; 4 → collapse CX into corresponding LO side; 2 → collapse by side) to match loss head indexing.
+  - (Legacy simulator removed) Prior generic simulator has been removed in favor of `synthetic_ctmc`.
+
+- Experimental protocol
+  - Walk‑forward/train splits: `LOBDatasetBuilder.build_splits` and `.build_walkforward_splits()`; TBPTT, balanced windows, gradient clipping in `cli/train.py` + `training/pipeline.py`.
+  - Multi‑instrument/multi‑horizon orchestration: `cli/batch_train.py` and `cli/train_multi.py`; reporting across horizons in `cli/report_multi.py`.
+  - Economic significance / backtests: `cli/economic.py` and `evaluation/economic.py` (VaR/ES, Kupiec/Christoffersen, realized‑volatility regime splits, utility‑based threshold selection). The CLI exposes bootstrap CIs for VaR/ES via `--bootstrap-ci`.
+  - Panel/liquidity matching: `cli/panel.py` with `compute_liquidity_panel` and `match_instruments_across_markets` in `data/preprocess.py` (optional Rust `bin/torpedocode-panel`).
+
+    - `cubical_scalar_field` to choose the scalar field for cubical complexes (`imbalance` [default], `bid`, `ask`, `net`).
+  - Persistence images: you can set `image_resolution` up to 128 and `image_bandwidth` (e.g., 0.02/0.05) via topology JSON or CLI selection.
+
+All changes preserve existing defaults and tests while exposing the paper’s parameterizations where needed.
+## Cross-Market Orchestration
+
+- Build a matched panel via `python -m torpedocode.cli.panel ...` (produces CSV/JSON with columns including `market,symbol`).
+- Run pooled or leave‑one‑market‑out (LOMO) evaluations with a fast logistic baseline:
+  - `python -m torpedocode.cli.cross_market --panel matched.csv --cache-root ./cache --label-key instability_s_5 --mode pooled --with-tda --output pooled.json`
+  - Use `--mode lomo` for LOMO. Outputs include per‑market metrics and global micro/macro aggregates.

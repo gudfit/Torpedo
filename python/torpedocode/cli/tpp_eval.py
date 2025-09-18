@@ -18,7 +18,7 @@ from ..evaluation.tpp import (
     model_and_empirical_frequencies,
     nll_per_event_from_arrays,
 )
-from ..evaluation.metrics import compute_point_process_diagnostics
+from ..evaluation.metrics import compute_point_process_diagnostics, ks_statistic, kolmogorov_pvalue
 
 
 def _load_npz(path: Path) -> TPPArrays:
@@ -49,23 +49,6 @@ def main():
     diag = compute_point_process_diagnostics(xi, empirical_frequencies=emp, model_frequencies=mod)
     nll_evt = nll_per_event_from_arrays(arr.intensities, arr.event_type_ids, arr.delta_t)
 
-    def _ks_statistic(u: np.ndarray) -> float:
-        n = len(u)
-        if n == 0:
-            return float("nan")
-        u_sorted = np.sort(u)
-        cdf = np.arange(1, n + 1) / n
-        d_plus = np.max(cdf - u_sorted)
-        d_minus = np.max(u_sorted - (np.arange(n) / n))
-        return float(max(d_plus, d_minus))
-
-    def _kolmogorov_pvalue(ks: float, n: int) -> float:
-        if n <= 0 or not np.isfinite(ks):
-            return float("nan")
-        lam = (np.sqrt(n) + 0.12 + 0.11 / np.sqrt(n)) * ks
-        terms = [2 * (-1) ** (k - 1) * np.exp(-2 * (k * k) * (lam * lam)) for k in range(1, 101)]
-        return float(max(0.0, min(1.0, 1.0 - 2.0 * sum(terms))))
-
     per_type = []
     M = arr.intensities.shape[1]
     xi_by_type = rescaled_times_per_type(arr)
@@ -77,8 +60,8 @@ def main():
 
             ks_p = float(_kstest(U_m, "uniform").pvalue) if U_m.size > 0 else float("nan")
         except Exception:
-            ks = _ks_statistic(U_m)
-            ks_p = _kolmogorov_pvalue(ks, len(U_m))
+            ks = ks_statistic(U_m)
+            ks_p = kolmogorov_pvalue(ks, len(U_m))
         per_type.append({"event_type": int(m), "ks_p_value": ks_p})
     preds = np.argmax(arr.intensities, axis=1).astype(int)
     M = int(arr.intensities.shape[1])
@@ -126,7 +109,6 @@ def main():
         "per_type_metrics": per_type_metrics,
     }
 
-    # Optional: per-type calibration histograms of model mass vs event occurrences.
     if int(args.per_type_hist_bins) and int(args.per_type_hist_bins) > 0:
         bins = int(args.per_type_hist_bins)
         lam = arr.intensities
@@ -138,7 +120,6 @@ def main():
         for m in range(M):
             w = mass[:, m]
             h_m, _ = np.histogram(w, bins=edges)
-            # Empirical events weighted by indicator
             e = (arr.event_type_ids == m).astype(float)
             he_m, _ = np.histogram(w, bins=edges, weights=e)
             hist.append(

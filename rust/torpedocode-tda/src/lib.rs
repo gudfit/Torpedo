@@ -120,22 +120,30 @@ fn epsilon_for_lcc<'py>(_py: Python<'py>, x: PyReadonlyArray2<f64>, threshold: f
     let n = x.nrows();
     if n <= 1 { return Ok(0.0); }
     let d = l2_distance_matrix(&x.to_owned());
-    // collect finite distances
+    // Collect unique finite distances as candidate epsilons
     let mut vals: Vec<f64> = Vec::with_capacity(n * n);
     for i in 0..n { for j in 0..n { let w = d[(i,j)]; if w.is_finite() { vals.push(w); } } }
     if vals.is_empty() { return Ok(1.0); }
     vals.sort_by(|a,b| a.partial_cmp(b).unwrap());
-    // coarse grid of quantiles
-    let g = 25usize;
-    let mut chosen = *vals.last().unwrap();
-    for i in 1..g {
-        let q = (i as f64) / ((g) as f64);
-        let idx = ((q * ((vals.len()-1) as f64)).round() as usize).min(vals.len()-1);
-        let eps = vals[idx];
+    vals.dedup_by(|a,b| (*a - *b).abs() <= std::f64::EPSILON);
+    // Monotone binary search for minimal epsilon achieving threshold LCC fraction
+    let mut lo = 0usize;
+    let mut hi = vals.len()-1;
+    let mut ans = vals[hi];
+    while lo <= hi {
+        let mid = (lo + hi) / 2;
+        let eps = vals[mid];
         let frac = lcc_fraction(&d, eps);
-        if frac >= threshold { chosen = eps; break; }
+        if frac >= threshold {
+            ans = eps;
+            if mid == 0 { break; }
+            hi = mid - 1;
+        } else {
+            if mid == vals.len()-1 { break; }
+            lo = mid + 1;
+        }
     }
-    Ok(chosen)
+    Ok(ans)
 }
 
 #[pymodule]
@@ -143,6 +151,8 @@ fn torpedocode_tda(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(estimate_vr_epsilon, m)?)?;
     m.add_function(wrap_pyfunction!(epsilon_for_lcc, m)?)?;
     m.add_function(wrap_pyfunction!(queue_age_series, m)?)?;
+    m.add_function(wrap_pyfunction!(queue_age_series_with_halts, m)?)?;
+    m.add_function(wrap_pyfunction!(queue_age_levels, m)?)?;
     Ok(())
 }
 
@@ -166,4 +176,51 @@ fn queue_age_series(sz: PyReadonlyArray1<f64>, pr: PyReadonlyArray1<f64>, dt: Py
         }
     }
     Ok(age)
+}
+
+#[pyfunction]
+fn queue_age_series_with_halts(sz: PyReadonlyArray1<f64>, pr: PyReadonlyArray1<f64>, dt: PyReadonlyArray1<f32>, halted: PyReadonlyArray1<bool>) -> PyResult<Vec<f32>> {
+    let sz = sz.as_array();
+    let pr = pr.as_array();
+    let dt = dt.as_array();
+    let halted = halted.as_array();
+    let n = sz.len();
+    let mut age = vec![0.0f32; n];
+    if n == 0 { return Ok(age); }
+    for i in 1..n {
+        let s_changed = sz[i] != sz[i-1];
+        let p_i = pr[i];
+        let p_prev = pr[i-1];
+        let p_changed = !p_i.is_finite() || !p_prev.is_finite() || (p_i != p_prev);
+        if halted.get(i).copied().unwrap_or(false) || s_changed || p_changed {
+            age[i] = 0.0;
+        } else {
+            age[i] = age[i-1] + dt[i].max(0.0);
+        }
+    }
+    Ok(age)
+}
+
+#[pyfunction]
+fn queue_age_levels(sz: PyReadonlyArray2<f64>, pr: PyReadonlyArray2<f64>, dt: PyReadonlyArray1<f32>, halted: Option<PyReadonlyArray1<bool>>) -> PyResult<Vec<f32>> {
+    let sz = sz.as_array();
+    let pr = pr.as_array();
+    let dt = dt.as_array();
+    let (t, l) = (sz.nrows(), sz.ncols());
+    let mut out = vec![0.0f32; t * l];
+    if t == 0 || l == 0 { return Ok(out); }
+    let halted_opt = halted.as_ref().map(|h| h.as_array());
+    for i in 1..t {
+        let dti = dt[i].max(0.0);
+        let halt = halted_opt.map(|h| h[i]).unwrap_or(false);
+        for j in 0..l {
+            let idx = i * l + j;
+            if halt || sz[(i,j)] != sz[(i-1,j)] || pr[(i,j)] != pr[(i-1,j)] || !pr[(i,j)].is_finite() || !pr[(i-1,j)].is_finite() {
+                out[idx] = 0.0;
+            } else {
+                out[idx] = out[idx - l] + dti;
+            }
+        }
+    }
+    Ok(out)
 }

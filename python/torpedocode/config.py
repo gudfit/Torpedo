@@ -36,6 +36,9 @@ class DataConfig:
     instability_threshold_eta: float = 0.0
     # Optional: emit side-aware MO±/CX± event codes when data contains side
     side_aware_events: bool = False
+    # Optional feature-engineering parameters
+    count_windows_s: Iterable[int] | None = None
+    ewma_halflives_s: Iterable[float] | None = None
 
 
 @dataclass(slots=True)
@@ -61,11 +64,13 @@ class TopologyConfig:
     vr_epsilon_rule: Literal["mst_quantile", "largest_cc"] = "largest_cc"
     vr_lcc_threshold: float = 0.99
     vr_lcc_grid_size: int = 25
+    vr_zscore: bool = True
     use_liquidity_surface: bool = True
     levels_hint: int | None = None
     imbalance_eps: float = 1e-6
     use_raw_liquidity_surface: bool = True
     use_raw_for_vr: bool = False
+    cubical_scalar_field: Literal["imbalance", "bid", "ask", "net"] = "imbalance"
 
 
 @dataclass(slots=True)

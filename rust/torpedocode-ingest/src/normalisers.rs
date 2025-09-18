@@ -39,36 +39,36 @@ impl Normaliser for NasdaqItchNormaliser {
         let (event_type, size, price, level, side) = match msg {
             ItchMessage::AddOrder { side, price, size, level }
             | ItchMessage::AddAttributed { side, price, size, level } => {
-                let et = match side.as_str() {
-                    "B" | "b" => "LO+",
-                    "S" | "s" => "LO-",
-                    _ => "LO?",
+                let (et, s_opt) = match side.as_str() {
+                    "B" | "b" => ("LO+", Some(side)),
+                    "S" | "s" => ("LO-", Some(side)),
+                    _ => ("LO", None),
                 };
-                (et.to_string(), size, price, level, Some(side))
+                (et.to_string(), size, price, level, s_opt)
             }
             ItchMessage::Replace { side, price, size, level } => {
-                let et = match side.as_str() {
-                    "B" | "b" => "LO+",
-                    "S" | "s" => "LO-",
-                    _ => "LO?",
+                let (et, s_opt) = match side.as_str() {
+                    "B" | "b" => ("LO+", Some(side)),
+                    "S" | "s" => ("LO-", Some(side)),
+                    _ => ("LO", None),
                 };
-                (et.to_string(), size, price, level, Some(side))
+                (et.to_string(), size, price, level, s_opt)
             }
             ItchMessage::Execute { side, price, size } => {
-                let et = match side.as_str() {
-                    "B" | "b" => "MO+",
-                    "S" | "s" => "MO-",
-                    _ => "MO?",
+                let (et, s_opt) = match side.as_str() {
+                    "B" | "b" => ("MO+", Some(side)),
+                    "S" | "s" => ("MO-", Some(side)),
+                    _ => ("MO", None),
                 };
-                (et.to_string(), size, price, None, Some(side))
+                (et.to_string(), size, price, None, s_opt)
             }
             ItchMessage::Cancel { side, price, size } => {
-                let et = match side.as_str() {
-                    "B" | "b" => "CX+",
-                    "S" | "s" => "CX-",
-                    _ => "CX?",
+                let (et, s_opt) = match side.as_str() {
+                    "B" | "b" => ("CX+", Some(side)),
+                    "S" | "s" => ("CX-", Some(side)),
+                    _ => ("CX", None),
                 };
-                (et.to_string(), size, price, None, Some(side))
+                (et.to_string(), size, price, None, s_opt)
             }
         };
 
@@ -106,28 +106,28 @@ impl Normaliser for NasdaqOuchNormaliser {
         let (event_type, size, price, level, side) = match msg {
             OuchMessage::Enter { side, price, size, level }
             | OuchMessage::Replace { side, price, size, level } => {
-                let et = match side.as_str() {
-                    "B" | "b" => "LO+",
-                    "S" | "s" => "LO-",
-                    _ => "LO?",
+                let (et, s_opt) = match side.as_str() {
+                    "B" | "b" => ("LO+", Some(side)),
+                    "S" | "s" => ("LO-", Some(side)),
+                    _ => ("LO", None),
                 };
-                (et.to_string(), size, price, level, Some(side))
+                (et.to_string(), size, price, level, s_opt)
             }
             OuchMessage::Cancel { side, price, size } => {
-                let et = match side.as_str() {
-                    "B" | "b" => "CX+",
-                    "S" | "s" => "CX-",
-                    _ => "CX?",
+                let (et, s_opt) = match side.as_str() {
+                    "B" | "b" => ("CX+", Some(side)),
+                    "S" | "s" => ("CX-", Some(side)),
+                    _ => ("CX", None),
                 };
-                (et.to_string(), size, price, None, Some(side))
+                (et.to_string(), size, price, None, s_opt)
             }
             OuchMessage::Execute { side, price, size } => {
-                let et = match side.as_str() {
-                    "B" | "b" => "MO+",
-                    "S" | "s" => "MO-",
-                    _ => "MO?",
+                let (et, s_opt) = match side.as_str() {
+                    "B" | "b" => ("MO+", Some(side)),
+                    "S" | "s" => ("MO-", Some(side)),
+                    _ => ("MO", None),
                 };
-                (et.to_string(), size, price, None, Some(side))
+                (et.to_string(), size, price, None, s_opt)
             }
         };
 

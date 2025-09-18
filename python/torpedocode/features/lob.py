@@ -22,11 +22,11 @@ from typing import Dict, Iterable, List, Tuple
 import numpy as np
 import pandas as pd
 
-# Optional native acceleration for queue age
 try:  # pragma: no cover - optional
     import torpedocode_tda as _tda_native  # type: ignore
 except Exception:  # pragma: no cover
     _tda_native = None
+
 
 def build_lob_feature_matrix(
     frame: pd.DataFrame,
@@ -35,6 +35,7 @@ def build_lob_feature_matrix(
     imbalance_ks: Iterable[int] = (1, 3, 5, 10),
     ret_horizons: Iterable[int] = (1, 5, 10),
     count_windows: Iterable[pd.Timedelta] = (pd.Timedelta(seconds=1), pd.Timedelta(seconds=5)),
+    ewma_halflives: Iterable[float] | None = None,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """Construct level-wise and aggregated features from snapshots."""
 
@@ -132,7 +133,31 @@ def build_lob_feature_matrix(
             per_win_blocks.append(block)
         counts_mat = np.concatenate(per_win_blocks, axis=1) if per_win_blocks else counts_mat
 
-    # Time-of-day encodings (UTC): sin/cos of seconds since midnight
+        taus = np.array(
+            list(ewma_halflives) if ewma_halflives is not None else [1.0, 5.0], dtype=float
+        )
+        if delta_t.size == Tn and Tn > 0:
+            ew_blocks = []
+            decay_factors = np.exp(-delta_t[:, None] / taus[None, :])
+            for j in range(K):
+                x = oh[:, j].astype(np.float32)
+                ew = np.zeros((Tn, len(taus)), dtype=np.float32)
+                for t in range(Tn):
+                    if t == 0:
+                        ew[t] = x[t]
+                    else:
+                        ew[t] = ew[t - 1] * decay_factors[t] + x[t]
+                ew_blocks.append(ew)
+            x = oh.sum(axis=1).astype(np.float32)
+            ew_total = np.zeros((Tn, len(taus)), dtype=np.float32)
+            for t in range(Tn):
+                if t == 0:
+                    ew_total[t] = x[t]
+                else:
+                    ew_total[t] = ew_total[t - 1] * decay_factors[t] + x[t]
+            ew_full = np.concatenate(ew_blocks + [ew_total], axis=1)
+            counts_mat = np.concatenate([counts_mat, ew_full], axis=1)
+
     time_utc = frame["timestamp"].dt.tz_convert("UTC")
     sod = (
         time_utc.dt.hour.to_numpy() * 3600
@@ -142,8 +167,15 @@ def build_lob_feature_matrix(
     angle = 2.0 * np.pi * sod / 86400.0
     tod_sin = np.sin(angle).astype(np.float32)
     tod_cos = np.cos(angle).astype(np.float32)
+    tod_progress = (sod / 86400.0).astype(np.float32)
+    dow = time_utc.dt.dayofweek.to_numpy().astype(np.int32)
+    dow_angle = 2.0 * np.pi * (dow.astype(np.float32) / 7.0)
+    dow_sin = np.sin(dow_angle).astype(np.float32)
+    dow_cos = np.cos(dow_angle).astype(np.float32)
 
-    def _queue_age_series(sz: np.ndarray, pr: np.ndarray) -> np.ndarray:
+    def _queue_age_series(
+        sz: np.ndarray, pr: np.ndarray, *, reset_mask: np.ndarray | None = None
+    ) -> np.ndarray:
         if _tda_native is not None:
             try:
                 return np.asarray(
@@ -159,31 +191,95 @@ def build_lob_feature_matrix(
             changed = (sz[i] != sz[i - 1]) or (
                 not np.isfinite(pr[i]) or not np.isfinite(pr[i - 1]) or pr[i] != pr[i - 1]
             )
-            age[i] = 0.0 if changed else age[i - 1] + float(delta_t[i])
+            hard_reset = bool(reset_mask[i]) if reset_mask is not None else False
+            age[i] = 0.0 if (changed or hard_reset) else age[i - 1] + float(delta_t[i])
         return age
 
-    # Queue ages for all levels (bid/ask) + retain level-1 for backward compatibility.
-    # Prefer exact last-update timestamps when available: last_update_bid_{l}/last_update_ask_{l}.
     qage_b = np.zeros((len(frame), levels), dtype=np.float32)
     qage_a = np.zeros((len(frame), levels), dtype=np.float32)
     ts_ns = frame["timestamp"].astype("int64").to_numpy()
-    for l in range(1, levels + 1):
-        # Fallback: change-detection ages
-        bs = frame.get(f"bid_size_{l}", pd.Series(index=frame.index, dtype=float).fillna(0.0)).to_numpy()
-        bp = frame.get(f"bid_price_{l}", pd.Series(index=frame.index, dtype=float)).to_numpy()
-        as_ = frame.get(f"ask_size_{l}", pd.Series(index=frame.index, dtype=float).fillna(0.0)).to_numpy()
-        ap = frame.get(f"ask_price_{l}", pd.Series(index=frame.index, dtype=float)).to_numpy()
-        age_b_fallback = _queue_age_series(bs, bp)
-        age_a_fallback = _queue_age_series(as_, ap)
 
-        # Exact ages when last_update columns are provided
+    use_rust_levels = _tda_native is not None and hasattr(_tda_native, "queue_age_levels")
+    rust_b_fallback = None
+    rust_a_fallback = None
+    if use_rust_levels:
+        try:
+            bid_price_mat = np.stack([p.to_numpy(dtype=float) for p in bid_prices], axis=1)
+            ask_price_mat = np.stack([p.to_numpy(dtype=float) for p in ask_prices], axis=1)
+            rust_b_fallback = np.asarray(
+                _tda_native.queue_age_levels(
+                    bid_sizes_mat.astype(float),
+                    bid_price_mat.astype(float),
+                    delta_t.astype(np.float32),
+                    None,
+                ),
+                dtype=np.float32,
+            ).reshape(len(frame), levels)
+            rust_a_fallback = np.asarray(
+                _tda_native.queue_age_levels(
+                    ask_sizes_mat.astype(float),
+                    ask_price_mat.astype(float),
+                    delta_t.astype(np.float32),
+                    None,
+                ),
+                dtype=np.float32,
+            ).reshape(len(frame), levels)
+        except Exception:
+            rust_b_fallback = None
+            rust_a_fallback = None
+    has_meta = "event_type" in frame.columns
+    side_col = frame.get("side", pd.Series([None] * len(frame)))
+    level_col = (
+        pd.to_numeric(frame.get("level", pd.Series([-1] * len(frame))), errors="coerce")
+        .fillna(-1)
+        .astype(int)
+    )
+    etype_col = frame.get("event_type", pd.Series([None] * len(frame))).astype(str)
+
+    for l in range(1, levels + 1):
+        bs = frame.get(
+            f"bid_size_{l}", pd.Series(index=frame.index, dtype=float).fillna(0.0)
+        ).to_numpy()
+        bp = frame.get(f"bid_price_{l}", pd.Series(index=frame.index, dtype=float)).to_numpy()
+        as_ = frame.get(
+            f"ask_size_{l}", pd.Series(index=frame.index, dtype=float).fillna(0.0)
+        ).to_numpy()
+        ap = frame.get(f"ask_price_{l}", pd.Series(index=frame.index, dtype=float)).to_numpy()
+        reset_b = np.zeros((len(frame),), dtype=bool)
+        reset_a = np.zeros((len(frame),), dtype=bool)
+        if has_meta:
+            mask_lo_cx = etype_col.isin(["LO+", "LO-", "CX+", "CX-"])
+            mask_lvl = level_col.values == l
+            if side_col is not None:
+                sb = (side_col.astype(str).str.lower() == "bid").to_numpy()
+                sa = (side_col.astype(str).str.lower() == "ask").to_numpy()
+                reset_b |= mask_lo_cx.to_numpy() & mask_lvl & sb
+                reset_a |= mask_lo_cx.to_numpy() & mask_lvl & sa
+            else:
+                m = mask_lo_cx.to_numpy() & mask_lvl
+                reset_b |= m
+                reset_a |= m
+            is_mo_buy = (etype_col == "MO+").to_numpy()
+            is_mo_sell = (etype_col == "MO-").to_numpy()
+            if l == 1:
+                reset_a |= is_mo_buy  # buy MOs hit asks
+                reset_b |= is_mo_sell  # sell MOs hit bids
+
+        if rust_b_fallback is not None:
+            age_b_fallback = rust_b_fallback[:, l - 1]
+        else:
+            age_b_fallback = _queue_age_series(bs, bp, reset_mask=reset_b)
+        if rust_a_fallback is not None:
+            age_a_fallback = rust_a_fallback[:, l - 1]
+        else:
+            age_a_fallback = _queue_age_series(as_, ap, reset_mask=reset_a)
+
         lb = frame.get(f"last_update_bid_{l}")
         la = frame.get(f"last_update_ask_{l}")
         if lb is not None:
             try:
                 lb_ns = pd.to_datetime(lb, utc=True, errors="coerce").astype("int64").to_numpy()
                 age_b = np.clip((ts_ns - lb_ns) / 1e9, a_min=0.0, a_max=None).astype(np.float32)
-                # If any NaNs remain (unparseable), fall back at those positions
                 if np.isnan(age_b).any():
                     mask = ~np.isfinite(age_b)
                     age_b[mask] = age_b_fallback[mask]
@@ -219,6 +315,9 @@ def build_lob_feature_matrix(
         "evt_counts": counts_mat.astype(np.float32),
         "tod_sin": tod_sin,
         "tod_cos": tod_cos,
+        "tod_progress": tod_progress,
+        "dow_sin": dow_sin,
+        "dow_cos": dow_cos,
         "queue_age_b": qage_b,
         "queue_age_a": qage_a,
         "queue_age_b1": queue_age_b1,

@@ -12,6 +12,7 @@ from ..config import ExperimentConfig
 from ..models import HybridLOBModel
 from .losses import HybridLossComputer
 from ..evaluation.calibration import TemperatureScaler
+from ..evaluation.metrics import compute_classification_metrics
 
 
 @dataclass
@@ -40,13 +41,30 @@ class TrainingPipeline:
     ) -> Dict[str, float]:
         """Run the full training loop with early stopping."""
 
-        # Respect the model's current device; don't force to CUDA automatically.
-        device = next(self.model.parameters()).device if any(p.requires_grad for p in self.model.parameters()) else torch.device("cpu")
+        device = (
+            next(self.model.parameters()).device
+            if any(p.requires_grad for p in self.model.parameters())
+            else torch.device("cpu")
+        )
         optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.config.training.learning_rate,
             weight_decay=0.0,
         )
+
+        try:
+            if hasattr(self.loss, "gamma"):
+                wd_nonzero = any(
+                    getattr(g, "weight_decay", 0.0) not in (0, 0.0) for g in optimizer.param_groups
+                )
+                if wd_nonzero and float(getattr(self.loss, "gamma", 0.0)) > 0:
+                    import warnings as _warnings
+
+                    _warnings.warn(
+                        "Optimizer has non-zero weight_decay while loss applies L2 via gamma; this will double-count."
+                    )
+        except Exception:
+            pass
 
         state = TrainingState()
         while state.epoch < self.config.training.max_epochs:
@@ -139,11 +157,24 @@ class TrainingPipeline:
             loss_outputs = self.loss(outputs, batch, list(self.model.parameters()))
             total_loss += float(loss_outputs.total.detach().cpu())
             num_batches += 1
-            if self.config.training.apply_temperature_scaling and "instability_labels" in batch:
+            if "instability_labels" in batch:
                 logits_all.append(outputs.instability_logits.detach().cpu().numpy().reshape(-1))
                 labels_all.append(batch["instability_labels"].detach().cpu().numpy().reshape(-1))
 
         metrics = {"val_loss": total_loss / max(num_batches, 1)}
+        if logits_all:
+            z = np.concatenate(logits_all)
+            y = np.concatenate(labels_all)
+            p = 1.0 / (1.0 + np.exp(-z))
+            m = compute_classification_metrics(p, y)
+            metrics.update(
+                {
+                    "val_brier": float(m.brier),
+                    "val_ece": float(m.ece),
+                    "val_auroc": float(m.auroc),
+                    "val_auprc": float(m.auprc),
+                }
+            )
         if self.config.training.apply_temperature_scaling and logits_all:
             z = np.concatenate(logits_all)
             y = np.concatenate(labels_all)
@@ -153,7 +184,15 @@ class TrainingPipeline:
             p = 1.0 / (1.0 + np.exp(-z_cal))
             eps = 1e-12
             bce = float(-np.mean(y * np.log(p + eps) + (1 - y) * np.log(1 - p + eps)))
-            metrics.update({"temperature": float(T), "val_bce_calibrated": bce})
+            mcal = compute_classification_metrics(p, y)
+            metrics.update(
+                {
+                    "temperature": float(T),
+                    "val_bce_calibrated": bce,
+                    "val_brier_calibrated": float(mcal.brier),
+                    "val_ece_calibrated": float(mcal.ece),
+                }
+            )
         return metrics
 
 

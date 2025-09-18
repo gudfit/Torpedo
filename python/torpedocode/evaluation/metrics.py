@@ -10,9 +10,14 @@ import math
 try:
     from sklearn.metrics import roc_auc_score as _roc_auc_score
     from sklearn.metrics import average_precision_score as _average_precision_score
+    try:  
+        from sklearn.exceptions import UndefinedMetricWarning as _SkUndefinedMetricWarning  # type: ignore
+    except Exception:  
+        _SkUndefinedMetricWarning = Warning  # type: ignore
 except Exception:  # pragma: no cover - optional
     _roc_auc_score = None
     _average_precision_score = None
+    _SkUndefinedMetricWarning = Warning  # type: ignore
 
 try:
     from scipy.stats import kstest as _kstest
@@ -42,12 +47,9 @@ class CalibrationReport:
 class PointProcessDiagnostics:
     """Diagnostic statistics for temporal point process models."""
 
-    # Historically this field held mean(xi), which is a proxy to exact NLL/event when
-    # intensities are not available. We keep it for backward compatibility.
     nll_per_event: float
     ks_p_value: float
     coverage_error: float
-    # Explicit alias to avoid confusion: equals mean(xi) in this function.
     nll_proxy_per_event: float | None = None
 
 
@@ -63,8 +65,12 @@ def compute_classification_metrics(
 
     # AUROC
     if _roc_auc_score is not None:
+        import warnings as _warnings
+
         try:
-            auroc = float(_roc_auc_score(y, p))
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("ignore", category=_SkUndefinedMetricWarning)
+                auroc = float(_roc_auc_score(y, p))
         except Exception:
             auroc = float("nan")
     else:
@@ -72,8 +78,11 @@ def compute_classification_metrics(
 
     # AUPRC
     if _average_precision_score is not None:
+        import warnings as _warnings
         try:
-            auprc = float(_average_precision_score(y, p))
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("ignore", category=_SkUndefinedMetricWarning)
+                auprc = float(_average_precision_score(y, p))
         except Exception:
             auprc = float("nan")
     else:
@@ -223,10 +232,7 @@ def bootstrap_ci_auroc(
     n_boot: int = 200,
     rng: np.random.Generator | None = None,
 ) -> tuple[float, float, float]:
-    """Bootstrap CI for AUROC by resampling pairs (p, y) with replacement.
-
-    Returns (auc, lo, hi). Falls back gracefully when degenerate (single-class) samples occur.
-    """
+    """Bootstrap CI for AUROC by resampling pairs (p, y) with replacement."""
     p = np.asarray(predictions, dtype=float).reshape(-1)
     y = np.asarray(labels, dtype=int).reshape(-1)
     if p.size == 0 or y.size != p.size:
@@ -247,7 +253,7 @@ def bootstrap_ci_auroc(
         pb = p[idx]
         yb = y[idx]
         if np.all(yb == 0) or np.all(yb == 1):
-            continue  # skip degenerate resample
+            continue  
         try:
             if _roc_auc_score is not None:
                 ab = float(_roc_auc_score(yb, pb))
@@ -370,12 +376,7 @@ def block_bootstrap_micro_ci(
 def politis_white_expected_block_length(
     predictions: np.ndarray, labels: np.ndarray, *, max_lag: int = 50
 ) -> float:
-    """Estimate expected block length for stationary bootstrap via a Politis–White-style rule.
-
-    Uses residual series s_t = p_t - y_t, truncated autocovariances up to `max_lag` to
-    form μ0 = γ(0) + 2∑_{k=1}^K γ(k) and μ2 = 2∑_{k=1}^K k γ(k), then
-    L* ≈ (2 μ2 / μ0^2)^{1/3} n^{1/3}. Falls back to n^{1/3} when degenerate.
-    """
+    """Estimate expected block length for stationary bootstrap via a Politis–White-style rule."""
     p = np.asarray(predictions, dtype=float).reshape(-1)
     y = np.asarray(labels, dtype=float).reshape(-1)
     n = len(p)
@@ -538,15 +539,21 @@ __all__ = [
     "politis_white_expected_block_length",
 ]
 
+def ks_statistic(u: np.ndarray) -> float:
+    """Public wrapper for the KS statistic helper (Uniform[0,1] one-sample)."""
+    return _ks_statistic(np.asarray(u, dtype=float))
+
+def kolmogorov_pvalue(ks: float, n: int) -> float:
+    """Public wrapper for the KS p-value helper (Uniform[0,1] one-sample)."""
+    return _kolmogorov_pvalue(float(ks), int(n))
+
+def stationary_block_indices(n: int, expected_block_length: float, rng: np.random.Generator) -> np.ndarray:
+    """Public wrapper for stationary block bootstrap index generation."""
+    return _stationary_block_indices(int(n), float(expected_block_length), rng)
+
 
 def benjamini_hochberg(pvals: np.ndarray, alpha: float = 0.05) -> dict:
-    """Benjamini–Hochberg FDR control.
-
-    Returns a dict with fields:
-      - rejected: boolean mask of rejections at level alpha
-      - qvalues: BH-adjusted p-values
-      - threshold: critical value t such that p_(k) <= (k/m)*alpha
-    """
+    """Benjamini–Hochberg FDR control."""
     p = np.asarray(pvals, dtype=float).reshape(-1)
     m = len(p)
     if m == 0:

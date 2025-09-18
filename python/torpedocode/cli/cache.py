@@ -45,7 +45,8 @@ def main():
         "--per-file", action="store_true", help="Write one cache per file; instrument = file stem"
     )
     ap.add_argument("--time-zone", type=str, default="UTC")
-    ap.add_argument("--drop-auctions", action="store_true", default=False)
+    # Paper default: exclude auctions/halts; fallback will retry without drop if empty
+    ap.add_argument("--drop-auctions", action="store_true", default=True)
     ap.add_argument(
         "--session-tz",
         type=str,

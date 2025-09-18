@@ -3,10 +3,11 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::fs::File;
 use std::io::Read;
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 
-fn to_canonical<'a>(py: Python<'a>, ts_ns: u64, event_type: &str, size: f64, price: f64, side: Option<&str>, symbol: &str, venue: &str) -> PyResult<&'a PyDict> {
+fn to_canonical<'a>(py: Python<'a>, ts_ns: i128, event_type: &str, size: f64, price: f64, side: Option<&str>, symbol: &str, venue: &str, level_inferred: bool) -> PyResult<&'a PyDict> {
     let d = PyDict::new(py);
-    d.set_item("timestamp", ts_ns as i128)?; 
+    d.set_item("timestamp", ts_ns)?; 
     d.set_item("event_type", event_type)?;
     d.set_item("size", size)?;
     d.set_item("price", price)?;
@@ -14,14 +15,35 @@ fn to_canonical<'a>(py: Python<'a>, ts_ns: u64, event_type: &str, size: f64, pri
     if let Some(s) = side { d.set_item("side", s)?; } else { d.set_item("side", py.None())?; }
     d.set_item("symbol", if symbol.is_empty() { py.None() } else { symbol.into_py(py) })?;
     d.set_item("venue", venue)?;
+    d.set_item("level_inferred", level_inferred)?;
     Ok(d)
 }
 
-fn to_price_scaled(v: f64, tick_size: f64) -> f64 {
-    if tick_size > 0.0 {
-        return (v / tick_size).round() * tick_size;
+fn to_price_scaled(mut v: f64, tick_size: f64, adj_factor: Option<f64>, adj_mode: Option<&str>) -> f64 {
+    if let Some(f) = adj_factor {
+        match adj_mode.unwrap_or("divide").to_ascii_lowercase().as_str() {
+            "multiply" => { v *= f; }
+            _ => { v /= f; }
+        }
     }
-    v
+    if tick_size > 0.0 { (v / tick_size).round() * tick_size } else { v }
+}
+
+fn resolve_epoch_ns(ts_ns: u64, session_date: Option<&str>, tz_offset_seconds: Option<i64>) -> i128 {
+    // If looks like intra-day (< 24h), and session_date provided, convert to UTC epoch.
+    const DAY_NS: u64 = 86_400_000_000_000;
+    if let Some(date_str) = session_date {
+        if ts_ns < DAY_NS {
+            if let Ok(nd) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                let ndt = NaiveDateTime::new(nd, NaiveTime::from_hms_opt(0,0,0).unwrap());
+                let base = ndt.and_utc().timestamp_nanos_opt().unwrap_or(0);
+                let base_i128 = base as i128;
+                let tz = (tz_offset_seconds.unwrap_or(0) as i128) * 1_000_000_000i128;
+                return base_i128 - tz + (ts_ns as i128);
+            }
+        }
+    }
+    ts_ns as i128
 }
 
 fn read_file(path: &str) -> PyResult<Vec<u8>> {
@@ -32,11 +54,12 @@ fn read_file(path: &str) -> PyResult<Vec<u8>> {
 }
 
 // Minimal custom binary format (timestamp 8 LE, type, payload LE) 
-fn parse_itch_minimal<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: &str) -> PyResult<PyObject> {
+fn parse_itch_minimal<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: &str, session_date: Option<&str>, tz_offset_seconds: Option<i64>, adj_factor: Option<f64>, adj_mode: Option<&str>) -> PyResult<PyObject> {
     let mut out: Vec<PyObject> = Vec::new();
     let mut i = 0usize;
     while i + 9 <= buf.len() {
-        let ts_ns = u64::from_le_bytes(buf[i..i + 8].try_into().unwrap()); i += 8;
+        let ts_raw = u64::from_le_bytes(buf[i..i + 8].try_into().unwrap()); i += 8;
+        let ts_ns = resolve_epoch_ns(ts_raw, session_date, tz_offset_seconds);
         let m = buf[i] as char; i += 1;
         match m {
             'A' => {
@@ -47,8 +70,8 @@ fn parse_itch_minimal<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: &s
                 let price_i = u64::from_le_bytes(buf[i..i+8].try_into().unwrap()) as f64; i += 8;
                 // stock id/hash
                 i += 8;
-                let price = to_price_scaled(price_i * 1e-4, tick_size);
-                let d = to_canonical(py, ts_ns, if side == 'B' { "LO+" } else { "LO-" }, shares, price, Some(&side.to_string()), symbol, "ITCH")?;
+                let price = to_price_scaled(price_i * 1e-4, tick_size, adj_factor, adj_mode);
+                let d = to_canonical(py, ts_ns, if side == 'B' { "LO+" } else { "LO-" }, shares, price, Some(&side.to_string()), symbol, "ITCH", false)?;
                 out.push(d.into());
             },
             'F' => {
@@ -58,22 +81,22 @@ fn parse_itch_minimal<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: &s
                 let shares = u32::from_le_bytes(buf[i..i+4].try_into().unwrap()) as f64; i += 4;
                 let price_i = u64::from_le_bytes(buf[i..i+8].try_into().unwrap()) as f64; i += 8;
                 i += 4;
-                let price = to_price_scaled(price_i * 1e-4, tick_size);
-                let d = to_canonical(py, ts_ns, if side == 'B' { "LO+" } else { "LO-" }, shares, price, Some(&side.to_string()), symbol, "ITCH")?;
+                let price = to_price_scaled(price_i * 1e-4, tick_size, adj_factor, adj_mode);
+                let d = to_canonical(py, ts_ns, if side == 'B' { "LO+" } else { "LO-" }, shares, price, Some(&side.to_string()), symbol, "ITCH", false)?;
                 out.push(d.into());
             },
             'E' => {
                 if i + 8 + 4 > buf.len() { break; }
                 i += 8; 
                 let executed = u32::from_le_bytes(buf[i..i+4].try_into().unwrap()) as f64; i += 4;
-                let d = to_canonical(py, ts_ns, "MO+", executed, f64::NAN, None, symbol, "ITCH")?;
+                let d = to_canonical(py, ts_ns, "MO+", executed, f64::NAN, None, symbol, "ITCH", false)?;
                 out.push(d.into());
             },
             'X' => {
                 if i + 8 + 4 > buf.len() { break; }
                 i += 8;
                 let canceled = u32::from_le_bytes(buf[i..i+4].try_into().unwrap()) as f64; i += 4;
-                let d = to_canonical(py, ts_ns, "CX+", canceled, f64::NAN, None, symbol, "ITCH")?;
+                let d = to_canonical(py, ts_ns, "CX+", canceled, f64::NAN, None, symbol, "ITCH", false)?;
                 out.push(d.into());
             },
             'P' => {
@@ -82,14 +105,14 @@ fn parse_itch_minimal<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: &s
                 let side = buf[i] as char; i += 1;
                 let shares = u32::from_le_bytes(buf[i..i+4].try_into().unwrap()) as f64; i += 4;
                 let price_i = u64::from_le_bytes(buf[i..i+8].try_into().unwrap()) as f64; i += 8;
-                let price = to_price_scaled(price_i * 1e-4, tick_size);
-                let d = to_canonical(py, ts_ns, "MO+", shares, price, Some(&side.to_string()), symbol, "ITCH")?;
+                let price = to_price_scaled(price_i * 1e-4, tick_size, adj_factor, adj_mode);
+                let d = to_canonical(py, ts_ns, "MO+", shares, price, Some(&side.to_string()), symbol, "ITCH", false)?;
                 out.push(d.into());
             },
             'D' => {
                 if i + 8 > buf.len() { break; }
                 i += 8;
-                let d = to_canonical(py, ts_ns, "CX+", 0.0, f64::NAN, None, symbol, "ITCH")?;
+                let d = to_canonical(py, ts_ns, "CX+", 0.0, f64::NAN, None, symbol, "ITCH", false)?;
                 out.push(d.into());
             },
             'C' => {
@@ -97,8 +120,8 @@ fn parse_itch_minimal<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: &s
                 i += 8;
                 let executed = u32::from_le_bytes(buf[i..i+4].try_into().unwrap()) as f64; i += 4;
                 let price_i = u64::from_le_bytes(buf[i..i+8].try_into().unwrap()) as f64; i += 8;
-                let price = to_price_scaled(price_i * 1e-4, tick_size);
-                let d = to_canonical(py, ts_ns, "MO+", executed, price, None, symbol, "ITCH")?;
+                let price = to_price_scaled(price_i * 1e-4, tick_size, adj_factor, adj_mode);
+                let d = to_canonical(py, ts_ns, "MO+", executed, price, None, symbol, "ITCH", false)?;
                 out.push(d.into());
             },
             'U' => {
@@ -107,8 +130,8 @@ fn parse_itch_minimal<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: &s
                 i += 8; // new
                 let new_shares = u32::from_le_bytes(buf[i..i+4].try_into().unwrap()) as f64; i += 4;
                 let price_i = u64::from_le_bytes(buf[i..i+8].try_into().unwrap()) as f64; i += 8;
-                let price = to_price_scaled(price_i * 1e-4, tick_size);
-                let d = to_canonical(py, ts_ns, "LO+", new_shares, price, None, symbol, "ITCH")?;
+                let price = to_price_scaled(price_i * 1e-4, tick_size, adj_factor, adj_mode);
+                let d = to_canonical(py, ts_ns, "LO+", new_shares, price, None, symbol, "ITCH", false)?;
                 out.push(d.into());
             },
             _ => {
@@ -127,7 +150,9 @@ fn be_u48_to_u64(b: &[u8]) -> u64 {
     ((b[0] as u64) << 40) | ((b[1] as u64) << 32) | ((b[2] as u64) << 24) | ((b[3] as u64) << 16) | ((b[4] as u64) << 8) | (b[5] as u64)
 }
 
-fn parse_itch_nasdaq_50<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: &str) -> PyResult<PyObject> {
+fn parse_itch_nasdaq_50<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: &str,
+                            session_date: Option<&str>, tz_offset_seconds: Option<i64>,
+                            price_adjust_factor: Option<f64>, price_adjust_mode: Option<&str>) -> PyResult<PyObject> {
     let mut i = 0usize;
     let mut out: Vec<PyObject> = Vec::new();
     let is_type = |b: u8| matches!(b as char, 'S'|'R'|'H'|'L'|'A'|'F'|'E'|'C'|'X'|'D'|'U'|'P'|'Q'|'B');
@@ -166,13 +191,13 @@ fn parse_itch_nasdaq_50<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: 
                 if i + 2+2+6 + 8 + 1 + 1 + 4 > buf.len() { break; }
                 i += 2; // stock locate
                 i += 2; // tracking
-                let ts = be_u48_to_u64(&buf[i..i+6]); i += 6; // ts
+                let ts_local = be_u48_to_u64(&buf[i..i+6]); i += 6; // ts
                 let _stock = &buf[i..i+8]; i += 8; // stock (ignored)
                 let state_c = buf[i] as char; i += 1; // trading state code
                 i += 1; // reserved
                 let reason = be_u32(&buf[i..i+4]); i += 4; // reason code (raw)
                 // Emit a canonical META event with trading_state and reason; size=0, price=NaN
-                let d = to_canonical(py, ts, "META", 0.0, f64::NAN, None, symbol, "ITCH")?;
+                let d = to_canonical(py, resolve_epoch_ns(ts_local, session_date, tz_offset_seconds), "META", 0.0, f64::NAN, None, symbol, "ITCH", false)?;
                 d.set_item("trading_state", state_c.to_string())?;
                 d.set_item("state_reason", reason)?;
                 // Convenience boolean
@@ -185,124 +210,124 @@ fn parse_itch_nasdaq_50<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: 
                 if i + 2+2+6+8+1+4+8+4 > buf.len() { break; }
                 let _stock_loc = be_u16(&buf[i..i+2]); i += 2;
                 let _track = be_u16(&buf[i..i+2]); i += 2;
-                let ts = be_u48_to_u64(&buf[i..i+6]); i += 6;
+                let ts = resolve_epoch_ns(be_u48_to_u64(&buf[i..i+6]), session_date, tz_offset_seconds); i += 6;
                 i += 8; // order ref
                 let side = buf[i] as char; i += 1;
                 let shares = be_u32(&buf[i..i+4]) as f64; i += 4;
                 i += 8; // stock (8 bytes)
                 let price_i = be_u32(&buf[i..i+4]) as f64; i += 4;
-                let price = to_price_scaled(price_i * 1e-4, tick_size);
-                let d = to_canonical(py, ts, if side == 'B' { "LO+" } else { "LO-" }, shares, price, Some(&side.to_string()), symbol, "ITCH")?;
+                let price = to_price_scaled(price_i * 1e-4, tick_size, price_adjust_factor, price_adjust_mode);
+                let d = to_canonical(py, ts, if side == 'B' { "LO+" } else { "LO-" }, shares, price, Some(&side.to_string()), symbol, "ITCH", false)?;
                 out.push(d.into());
             }
             // Add Order with MPID (F)
             'F' => {
                 if i + 2+2+6+8+1+4+8+4+4 > buf.len() { break; }
                 i += 2; i += 2; // stock locate, tracking
-                let ts = be_u48_to_u64(&buf[i..i+6]); i += 6;
+                let ts = resolve_epoch_ns(be_u48_to_u64(&buf[i..i+6]), session_date, tz_offset_seconds); i += 6;
                 i += 8; // order ref
                 let side = buf[i] as char; i += 1;
                 let shares = be_u32(&buf[i..i+4]) as f64; i += 4;
                 i += 8; // stock
                 let price_i = be_u32(&buf[i..i+4]) as f64; i += 4;
                 i += 4; // mpid
-                let price = to_price_scaled(price_i * 1e-4, tick_size);
-                let d = to_canonical(py, ts, if side == 'B' { "LO+" } else { "LO-" }, shares, price, Some(&side.to_string()), symbol, "ITCH")?;
+                let price = to_price_scaled(price_i * 1e-4, tick_size, price_adjust_factor, price_adjust_mode);
+                let d = to_canonical(py, ts, if side == 'B' { "LO+" } else { "LO-" }, shares, price, Some(&side.to_string()), symbol, "ITCH", false)?;
                 out.push(d.into());
             }
             // Order Executed (E)
             'E' => {
                 if i + 2+2+6+8+4+8 > buf.len() { break; }
                 i += 2; i += 2;
-                let ts = be_u48_to_u64(&buf[i..i+6]); i += 6;
+                let ts = resolve_epoch_ns(be_u48_to_u64(&buf[i..i+6]), session_date, tz_offset_seconds); i += 6;
                 i += 8; // order ref
                 let executed = be_u32(&buf[i..i+4]) as f64; i += 4;
                 i += 8; // match
-                let d = to_canonical(py, ts, "MO+", executed, f64::NAN, None, symbol, "ITCH")?;
+                let d = to_canonical(py, ts, "MO+", executed, f64::NAN, None, symbol, "ITCH", false)?;
                 out.push(d.into());
             }
             // Order Executed With Price (C)
             'C' => {
                 if i + 2+2+6+8+4+8+1+4 > buf.len() { break; }
                 i += 2; i += 2;
-                let ts = be_u48_to_u64(&buf[i..i+6]); i += 6;
+                let ts = resolve_epoch_ns(be_u48_to_u64(&buf[i..i+6]), session_date, tz_offset_seconds); i += 6;
                 i += 8; // order ref
                 let executed = be_u32(&buf[i..i+4]) as f64; i += 4;
                 i += 8; // match
                 let _printable = buf[i]; i += 1;
                 let price_i = be_u32(&buf[i..i+4]) as f64; i += 4;
-                let price = to_price_scaled(price_i * 1e-4, tick_size);
-                let d = to_canonical(py, ts, "MO+", executed, price, None, symbol, "ITCH")?;
+                let price = to_price_scaled(price_i * 1e-4, tick_size, price_adjust_factor, price_adjust_mode);
+                let d = to_canonical(py, ts, "MO+", executed, price, None, symbol, "ITCH", false)?;
                 out.push(d.into());
             }
             // Order Cancel (X)
             'X' => {
                 if i + 2+2+6+8+4 > buf.len() { break; }
                 i += 2; i += 2;
-                let ts = be_u48_to_u64(&buf[i..i+6]); i += 6;
+                let ts = resolve_epoch_ns(be_u48_to_u64(&buf[i..i+6]), session_date, tz_offset_seconds); i += 6;
                 i += 8; // order ref
                 let canceled = be_u32(&buf[i..i+4]) as f64; i += 4;
-                let d = to_canonical(py, ts, "CX+", canceled, f64::NAN, None, symbol, "ITCH")?;
+                let d = to_canonical(py, ts, "CX+", canceled, f64::NAN, None, symbol, "ITCH", false)?;
                 out.push(d.into());
             }
             // Order Delete (D)
             'D' => {
                 if i + 2+2+6+8 > buf.len() { break; }
                 i += 2; i += 2;
-                let ts = be_u48_to_u64(&buf[i..i+6]); i += 6;
+                let ts = resolve_epoch_ns(be_u48_to_u64(&buf[i..i+6]), session_date, tz_offset_seconds); i += 6;
                 i += 8; // order ref
-                let d = to_canonical(py, ts, "CX+", 0.0, f64::NAN, None, symbol, "ITCH")?;
+                let d = to_canonical(py, ts, "CX+", 0.0, f64::NAN, None, symbol, "ITCH", false)?;
                 out.push(d.into());
             }
             // Order Replace (U)
             'U' => {
                 if i + 2+2+6+8+8+4+4 > buf.len() { break; }
                 i += 2; i += 2;
-                let ts = be_u48_to_u64(&buf[i..i+6]); i += 6;
+                let ts = resolve_epoch_ns(be_u48_to_u64(&buf[i..i+6]), session_date, tz_offset_seconds); i += 6;
                 i += 8; // orig order ref
                 i += 8; // new order ref
                 let new_shares = be_u32(&buf[i..i+4]) as f64; i += 4;
                 let price_i = be_u32(&buf[i..i+4]) as f64; i += 4;
-                let price = to_price_scaled(price_i * 1e-4, tick_size);
-                let d = to_canonical(py, ts, "LO+", new_shares, price, None, symbol, "ITCH")?;
+                let price = to_price_scaled(price_i * 1e-4, tick_size, price_adjust_factor, price_adjust_mode);
+                let d = to_canonical(py, ts, "LO+", new_shares, price, None, symbol, "ITCH", false)?;
                 out.push(d.into());
             }
             // Trade (Non-Cross) (P)
             'P' => {
                 if i + 2+2+6+8+1+4+8+4+8 > buf.len() { break; }
                 i += 2; i += 2;
-                let ts = be_u48_to_u64(&buf[i..i+6]); i += 6;
+                let ts = resolve_epoch_ns(be_u48_to_u64(&buf[i..i+6]), session_date, tz_offset_seconds); i += 6;
                 i += 8; // order ref
                 let side = buf[i] as char; i += 1;
                 let shares = be_u32(&buf[i..i+4]) as f64; i += 4;
                 i += 8; // stock
                 let price_i = be_u32(&buf[i..i+4]) as f64; i += 4;
                 i += 8; // match
-                let price = to_price_scaled(price_i * 1e-4, tick_size);
-                let d = to_canonical(py, ts, "MO+", shares, price, Some(&side.to_string()), symbol, "ITCH")?;
+                let price = to_price_scaled(price_i * 1e-4, tick_size, price_adjust_factor, price_adjust_mode);
+                let d = to_canonical(py, ts, "MO+", shares, price, Some(&side.to_string()), symbol, "ITCH", false)?;
                 out.push(d.into());
             }
             // Cross Trade (Q)
             'Q' => {
                 if i + 2+2+6 + 8 + 8 + 4 + 8 + 1 > buf.len() { break; }
                 i += 2; i += 2;
-                let ts = be_u48_to_u64(&buf[i..i+6]); i += 6;
+                let ts = resolve_epoch_ns(be_u48_to_u64(&buf[i..i+6]), session_date, tz_offset_seconds); i += 6;
                 let shares = u64::from_be_bytes([buf[i],buf[i+1],buf[i+2],buf[i+3],buf[i+4],buf[i+5],buf[i+6],buf[i+7]]) as f64; i += 8;
                 i += 8; // stock
                 let price_i = be_u32(&buf[i..i+4]) as f64; i += 4;
                 i += 8; // match
                 i += 1; // cross type
-                let price = to_price_scaled(price_i * 1e-4, tick_size);
-                let d = to_canonical(py, ts, "MO+", shares, price, None, symbol, "ITCH")?;
+                let price = to_price_scaled(price_i * 1e-4, tick_size, price_adjust_factor, price_adjust_mode);
+                let d = to_canonical(py, ts, "MO+", shares, price, None, symbol, "ITCH", false)?;
                 out.push(d.into());
             }
             // Broken Trade (B)
             'B' => {
                 if i + 2+2+6 + 8 > buf.len() { break; }
                 i += 2; i += 2;
-                let ts = be_u48_to_u64(&buf[i..i+6]); i += 6;
+                let ts = resolve_epoch_ns(be_u48_to_u64(&buf[i..i+6]), session_date, tz_offset_seconds); i += 6;
                 i += 8; // match
-                let d = to_canonical(py, ts, "CX+", 0.0, f64::NAN, None, symbol, "ITCH")?;
+                let d = to_canonical(py, ts, "CX+", 0.0, f64::NAN, None, symbol, "ITCH", false)?;
                 out.push(d.into());
             }
             _ => { if i < buf.len() { /* advance in next loop */ } continue; }
@@ -312,11 +337,13 @@ fn parse_itch_nasdaq_50<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: 
 }
 
 #[pyfunction]
-fn parse_itch_file(py: Python<'_>, path: &str, tick_size: f64, symbol: &str, spec: &str) -> PyResult<PyObject> {
+fn parse_itch_file(py: Python<'_>, path: &str, tick_size: f64, symbol: &str, spec: &str,
+                   session_date: Option<&str>, tz_offset_seconds: Option<i64>,
+                   price_adjust_factor: Option<f64>, price_adjust_mode: Option<&str>) -> PyResult<PyObject> {
     let buf = read_file(path)?;
     let want_nasdaq = spec.to_ascii_lowercase().starts_with("nasdaq-itch-5.0");
-    let try_nasdaq = || parse_itch_nasdaq_50(py, &buf, tick_size, symbol);
-    let try_min = || parse_itch_minimal(py, &buf, tick_size, symbol);
+    let try_nasdaq = || parse_itch_nasdaq_50(py, &buf, tick_size, symbol, session_date, tz_offset_seconds, price_adjust_factor, price_adjust_mode);
+    let try_min = || parse_itch_minimal(py, &buf, tick_size, symbol, session_date, tz_offset_seconds, price_adjust_factor, price_adjust_mode);
     let is_type = |c: u8| matches!(c as char, 'A'|'F'|'E'|'C'|'X'|'D'|'U'|'P');
 
     if want_nasdaq {
@@ -332,7 +359,9 @@ fn parse_itch_file(py: Python<'_>, path: &str, tick_size: f64, symbol: &str, spe
 }
 
 #[pyfunction]
-fn parse_ouch_file(py: Python<'_>, path: &str, tick_size: f64, symbol: &str, spec: &str) -> PyResult<PyObject> {
+fn parse_ouch_file(py: Python<'_>, path: &str, tick_size: f64, symbol: &str, spec: &str,
+                   _session_date: Option<&str>, _tz_offset_seconds: Option<i64>,
+                   _price_adjust_factor: Option<f64>, _price_adjust_mode: Option<&str>) -> PyResult<PyObject> {
     let mut f = File::open(path).map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf).map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
@@ -386,8 +415,8 @@ fn parse_ouch_minimal<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: &s
                 let side = buf[i] as char; i += 1;
                 let shares = u32::from_le_bytes(buf[i..i+4].try_into().unwrap()) as f64; i += 4;
                 let price_i = u64::from_le_bytes(buf[i..i+8].try_into().unwrap()) as f64; i += 8;
-                let price = to_price_scaled(price_i * 1e-4, tick_size);
-                let d = to_canonical(py, ts_ns, if side == 'B' { "LO+" } else { "LO-" }, shares, price, Some(&side.to_string()), symbol, "OUCH")?;
+                let price = to_price_scaled(price_i * 1e-4, tick_size, None, None);
+                let d = to_canonical(py, ts_ns as i128, if side == 'B' { "LO+" } else { "LO-" }, shares, price, Some(&side.to_string()), symbol, "OUCH", false)?;
                 out.push(d.into());
             },
             'U' => {
@@ -396,28 +425,28 @@ fn parse_ouch_minimal<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: &s
                 i += 8; // new
                 let new_shares = u32::from_le_bytes(buf[i..i+4].try_into().unwrap()) as f64; i += 4;
                 let price_i = u64::from_le_bytes(buf[i..i+8].try_into().unwrap()) as f64; i += 8;
-                let price = to_price_scaled(price_i * 1e-4, tick_size);
-                let d = to_canonical(py, ts_ns, "LO+", new_shares, price, None, symbol, "OUCH")?;
+                let price = to_price_scaled(price_i * 1e-4, tick_size, None, None);
+                let d = to_canonical(py, ts_ns as i128, "LO+", new_shares, price, None, symbol, "OUCH", false)?;
                 out.push(d.into());
             },
             'X' => {
                 if i + 8 + 4 > buf.len() { break; }
                 i += 8; // client_id
                 let canceled = u32::from_le_bytes(buf[i..i+4].try_into().unwrap()) as f64; i += 4;
-                let d = to_canonical(py, ts_ns, "CX+", canceled, f64::NAN, None, symbol, "OUCH")?;
+                let d = to_canonical(py, ts_ns as i128, "CX+", canceled, f64::NAN, None, symbol, "OUCH", false)?;
                 out.push(d.into());
             },
             'E' => {
                 if i + 8 + 4 > buf.len() { break; }
                 i += 8; // client_id
                 let executed = u32::from_le_bytes(buf[i..i+4].try_into().unwrap()) as f64; i += 4;
-                let d = to_canonical(py, ts_ns, "MO+", executed, f64::NAN, None, symbol, "OUCH")?;
+                let d = to_canonical(py, ts_ns as i128, "MO+", executed, f64::NAN, None, symbol, "OUCH", false)?;
                 out.push(d.into());
             },
             'D' => {
                 if i + 8 > buf.len() { break; }
                 i += 8; // client_id
-                let d = to_canonical(py, ts_ns, "CX+", 0.0, f64::NAN, None, symbol, "OUCH")?;
+                let d = to_canonical(py, ts_ns as i128, "CX+", 0.0, f64::NAN, None, symbol, "OUCH", false)?;
                 out.push(d.into());
             },
             _ => { break; }
@@ -455,8 +484,8 @@ fn parse_ouch_nasdaq_42<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: 
                 let shares = be_u32(&buf[i..i+4]) as f64; i += 4;
                 i += 8; // stock
                 let price_i = be_u32(&buf[i..i+4]) as f64; i += 4;
-                let price = to_price_scaled(price_i * 1e-4, tick_size);
-                let d = to_canonical(py, 0, if side == 'B' { "LO+" } else { "LO-" }, shares, price, Some(&side.to_string()), symbol, "OUCH")?;
+                let price = to_price_scaled(price_i * 1e-4, tick_size, None, None);
+                let d = to_canonical(py, 0, if side == 'B' { "LO+" } else { "LO-" }, shares, price, Some(&side.to_string()), symbol, "OUCH", false)?;
                 d.set_item("token", token)?;
                 out.push(d.into());
             }
@@ -476,8 +505,8 @@ fn parse_ouch_nasdaq_42<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: 
                 let new_shares = be_u32(&buf[i..i+4]) as f64; i += 4;
                 let price_i = be_u32(&buf[i..i+4]) as f64; i += 4;
                 i += 4; // tif
-                let price = to_price_scaled(price_i * 1e-4, tick_size);
-                let d = to_canonical(py, 0, "LO+", new_shares, price, None, symbol, "OUCH")?;
+                let price = to_price_scaled(price_i * 1e-4, tick_size, None, None);
+                let d = to_canonical(py, 0, "LO+", new_shares, price, None, symbol, "OUCH", false)?;
                 d.set_item("token_orig", tok_orig)?;
                 d.set_item("token_new", tok_new)?;
                 out.push(d.into());
@@ -488,7 +517,7 @@ fn parse_ouch_nasdaq_42<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: 
                 if i + need > buf.len() { break; }
                 let tok = String::from_utf8_lossy(&buf[i..i+14]).trim_end().to_string(); i += 14; // token
                 let canceled = be_u32(&buf[i..i+4]) as f64; i += 4;
-                let d = to_canonical(py, 0, "CX+", canceled, f64::NAN, None, symbol, "OUCH")?;
+                let d = to_canonical(py, 0, "CX+", canceled, f64::NAN, None, symbol, "OUCH", false)?;
                 d.set_item("token", tok)?;
                 out.push(d.into());
             }
@@ -499,7 +528,7 @@ fn parse_ouch_nasdaq_42<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: 
                 let tok = String::from_utf8_lossy(&buf[i..i+14]).trim_end().to_string(); i += 14; // token
                 let executed = be_u32(&buf[i..i+4]) as f64; i += 4;
                 let match_id = u64::from_be_bytes([buf[i],buf[i+1],buf[i+2],buf[i+3],buf[i+4],buf[i+5],buf[i+6],buf[i+7]]); i += 8; // match
-                let d = to_canonical(py, 0, "MO+", executed, f64::NAN, None, symbol, "OUCH")?;
+                let d = to_canonical(py, 0, "MO+", executed, f64::NAN, None, symbol, "OUCH", false)?;
                 d.set_item("token", tok)?;
                 d.set_item("match", match_id)?;
                 out.push(d.into());
@@ -512,8 +541,8 @@ fn parse_ouch_nasdaq_42<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: 
                 let executed = be_u32(&buf[i..i+4]) as f64; i += 4;
                 let price_i = be_u32(&buf[i..i+4]) as f64; i += 4;
                 let match_id = u64::from_be_bytes([buf[i],buf[i+1],buf[i+2],buf[i+3],buf[i+4],buf[i+5],buf[i+6],buf[i+7]]); i += 8; // match
-                let price = to_price_scaled(price_i * 1e-4, tick_size);
-                let d = to_canonical(py, 0, "MO+", executed, price, None, symbol, "OUCH")?;
+                let price = to_price_scaled(price_i * 1e-4, tick_size, None, None);
+                let d = to_canonical(py, 0, "MO+", executed, price, None, symbol, "OUCH", false)?;
                 d.set_item("token", tok)?;
                 d.set_item("match", match_id)?;
                 out.push(d.into());
@@ -525,7 +554,7 @@ fn parse_ouch_nasdaq_42<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: 
                 let tok = String::from_utf8_lossy(&buf[i..i+14]).trim_end().to_string(); i += 14;
                 let canceled = be_u32(&buf[i..i+4]) as f64; i += 4;
                 let reason = buf[i] as char; i += 1; // reason
-                let d = to_canonical(py, 0, "CX+", canceled, f64::NAN, None, symbol, "OUCH")?;
+                let d = to_canonical(py, 0, "CX+", canceled, f64::NAN, None, symbol, "OUCH", false)?;
                 d.set_item("token", tok)?;
                 d.set_item("reason", reason.to_string())?;
                 out.push(d.into());
@@ -543,7 +572,7 @@ fn parse_ouch_nasdaq_42<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: 
                 if i + need > buf.len() { break; }
                 let tok = String::from_utf8_lossy(&buf[i..i+14]).trim_end().to_string(); i += 14; // token
                 // Map to cancel with zero size
-                let d = to_canonical(py, 0, "CX+", 0.0, f64::NAN, None, symbol, "OUCH")?;
+                let d = to_canonical(py, 0, "CX+", 0.0, f64::NAN, None, symbol, "OUCH", false)?;
                 d.set_item("token", tok)?;
                 d.set_item("reason", "SYSTEM_CANCEL")?;
                 out.push(d.into());
@@ -556,7 +585,7 @@ fn parse_ouch_nasdaq_42<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: 
                 let match_id = u64::from_be_bytes([buf[i],buf[i+1],buf[i+2],buf[i+3],buf[i+4],buf[i+5],buf[i+6],buf[i+7]]); i += 8;  // match number
                 let reason = buf[i] as char; i += 1;  // reason
                 // Emit a neutralizing event to reflect correction (no size impact in canonical)
-                let d = to_canonical(py, 0, "CX+", 0.0, f64::NAN, None, symbol, "OUCH")?;
+                let d = to_canonical(py, 0, "CX+", 0.0, f64::NAN, None, symbol, "OUCH", false)?;
                 d.set_item("token", tok)?;
                 d.set_item("match", match_id)?;
                 d.set_item("reason", reason.to_string())?;
@@ -568,7 +597,7 @@ fn parse_ouch_nasdaq_42<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: 
                 if i + need > buf.len() { break; }
                 let tok = String::from_utf8_lossy(&buf[i..i+14]).trim_end().to_string(); i += 14;
                 let reason = buf[i] as char; i += 1; // reason
-                let d = to_canonical(py, 0, "CX+", 0.0, f64::NAN, None, symbol, "OUCH")?;
+                let d = to_canonical(py, 0, "CX+", 0.0, f64::NAN, None, symbol, "OUCH", false)?;
                 d.set_item("token", tok)?;
                 d.set_item("reason", reason.to_string())?;
                 out.push(d.into());
@@ -578,9 +607,94 @@ fn parse_ouch_nasdaq_42<'a>(py: Python<'a>, buf: &[u8], tick_size: f64, symbol: 
     }
     Ok(PyList::new(py, out).into())
 }
+#[pyfunction]
+fn parse_itch_iter(py: Python<'_>, path: &str, tick_size: f64, symbol: &str, spec: &str) -> PyResult<PyObject> {
+    let buf = read_file(path)?;
+    // Minimal iterator for little-endian prefixed records
+    let is_min = buf.len() >= 9 && {
+        let t0 = buf[0] as char;
+        let t8 = buf[8] as char;
+        !matches!(t0, 'S'|'R'|'H'|'A'|'F'|'E'|'C'|'X'|'D'|'U'|'P'|'Q'|'B') && matches!(t8, 'A'|'F'|'E'|'C'|'X'|'D'|'U'|'P')
+    };
+    if is_min {
+        let it = ItchMinimalIter { buf, idx: 0, tick: tick_size, symbol: symbol.to_string() };
+        return Ok(Py::new(py, it)?.into_py(py));
+    }
+    parse_itch_file(py, path, tick_size, symbol, spec, None, None, None, None)
+}
+
+#[pyfunction]
+fn parse_ouch_iter(py: Python<'_>, path: &str, tick_size: f64, symbol: &str, spec: &str) -> PyResult<PyObject> {
+    let buf = read_file(path)?;
+    let is_min = buf.len() >= 9 && {
+        let t0 = buf[0] as char;
+        let t8 = buf[8] as char;
+        !matches!(t0, 'O'|'U'|'X'|'E'|'C'|'D'|'T') && matches!(t8, 'O'|'U'|'X'|'E'|'C'|'D'|'T')
+    };
+    if is_min {
+        let it = OuchMinimalIter { buf, idx: 0, tick: tick_size, symbol: symbol.to_string() };
+        return Ok(Py::new(py, it)?.into_py(py));
+    }
+    parse_ouch_file(py, path, tick_size, symbol, spec, None, None, None, None)
+}
+
 #[pymodule]
 fn torpedocode_ingest(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_itch_file, m)?)?;
     m.add_function(wrap_pyfunction!(parse_ouch_file, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_itch_iter, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_ouch_iter, m)?)?;
     Ok(())
+}
+
+// Streaming iterators for minimal formats
+#[pyclass]
+struct ItchMinimalIter { buf: Vec<u8>, idx: usize, tick: f64, symbol: String }
+
+#[pymethods]
+impl ItchMinimalIter {
+    fn __iter__(slf: PyRefMut<'_, Self>) -> Py<ItchMinimalIter> { slf.into() }
+    fn __next__(&mut self, py: Python<'_>) -> Option<PyObject> {
+        let b = &self.buf;
+        let mut i = self.idx;
+        while i + 9 <= b.len() {
+            let ts = u64::from_le_bytes(b[i..i+8].try_into().ok()?); i += 8;
+            let m = b[i] as char; i += 1;
+            match m {
+                'A' => { if i + 8 + 1 + 4 + 8 + 8 > b.len() { return None; } i += 8; let side=b[i] as char; i+=1; let shares=u32::from_le_bytes(b[i..i+4].try_into().ok()?) as f64; i+=4; let price_i=u64::from_le_bytes(b[i..i+8].try_into().ok()?) as f64; i+=8; i+=8; let price = to_price_scaled(price_i*1e-4, self.tick, None, None); self.idx=i; let d=to_canonical(py, ts as i128, if side=='B'{"LO+"} else {"LO-"}, shares, price, Some(&side.to_string()), &self.symbol, "ITCH", false).ok()?; return Some(d.into()); }
+                'F' => { if i + 8 + 1 + 4 + 8 + 4 > b.len() { return None; } i += 8; let side=b[i] as char; i+=1; let shares=u32::from_le_bytes(b[i..i+4].try_into().ok()?) as f64; i+=4; let price_i=u64::from_le_bytes(b[i..i+8].try_into().ok()?) as f64; i+=8; i += 4; let price = to_price_scaled(price_i*1e-4, self.tick, None, None); self.idx=i; let d=to_canonical(py, ts as i128, if side=='B'{"LO+"} else {"LO-"}, shares, price, Some(&side.to_string()), &self.symbol, "ITCH", false).ok()?; return Some(d.into()); }
+                'E' => { if i + 8 + 4 > b.len() { return None; } i += 8; let executed=u32::from_le_bytes(b[i..i+4].try_into().ok()?) as f64; i+=4; self.idx=i; let d=to_canonical(py, ts as i128, "MO+", executed, f64::NAN, None, &self.symbol, "ITCH", false).ok()?; return Some(d.into()); }
+                'C' => { if i + 8 + 4 + 8 > b.len() { return None; } i += 8; let executed=u32::from_le_bytes(b[i..i+4].try_into().ok()?) as f64; i+=4; let price_i=u64::from_le_bytes(b[i..i+8].try_into().ok()?) as f64; i+=8; let price=to_price_scaled(price_i*1e-4,self.tick,None,None); self.idx=i; let d=to_canonical(py, ts as i128, "MO+", executed, price, None, &self.symbol, "ITCH", false).ok()?; return Some(d.into()); }
+                'X' => { if i + 8 + 4 > b.len() { return None; } i += 8; let canceled=u32::from_le_bytes(b[i..i+4].try_into().ok()?) as f64; i+=4; self.idx=i; let d=to_canonical(py, ts as i128, "CX+", canceled, f64::NAN, None, &self.symbol, "ITCH", false).ok()?; return Some(d.into()); }
+                'D' => { if i + 8 > b.len() { return None; } i+=8; self.idx=i; let d=to_canonical(py, ts as i128, "CX+", 0.0, f64::NAN, None, &self.symbol, "ITCH", false).ok()?; return Some(d.into()); }
+                'U' => { if i + 8 + 8 + 4 + 8 > b.len() { return None; } i += 8; i += 8; let new_shares=u32::from_le_bytes(b[i..i+4].try_into().ok()?) as f64; i+=4; let price_i=u64::from_le_bytes(b[i..i+8].try_into().ok()?) as f64; i+=8; let price=to_price_scaled(price_i*1e-4,self.tick,None,None); self.idx=i; let d=to_canonical(py, ts as i128, "LO+", new_shares, price, None, &self.symbol, "ITCH", false).ok()?; return Some(d.into()); }
+                _ => { self.idx=i; continue; }
+            }
+        }
+        None
+    }
+}
+
+#[pyclass]
+struct OuchMinimalIter { buf: Vec<u8>, idx: usize, tick: f64, symbol: String }
+
+#[pymethods]
+impl OuchMinimalIter {
+    fn __iter__(slf: PyRefMut<'_, Self>) -> Py<OuchMinimalIter> { slf.into() }
+    fn __next__(&mut self, py: Python<'_>) -> Option<PyObject> {
+        let b = &self.buf; let mut i = self.idx;
+        while i + 9 <= b.len() {
+            let _ts = u64::from_le_bytes(b[i..i+8].try_into().ok()?); i += 8;
+            let m = b[i] as char; i += 1;
+            match m {
+                'O' => { if i + 8 + 1 + 4 + 8 > b.len() { return None; } i += 8; let side=b[i] as char; i+=1; let shares=u32::from_le_bytes(b[i..i+4].try_into().ok()?) as f64; i+=4; let price_i=u64::from_le_bytes(b[i..i+8].try_into().ok()?) as f64; i+=8; let price=to_price_scaled(price_i*1e-4,self.tick,None,None); self.idx=i; let d=to_canonical(py, 0, if side=='B'{"LO+"} else {"LO-"}, shares, price, Some(&side.to_string()), &self.symbol, "OUCH", false).ok()?; return Some(d.into()); }
+                'U' => { if i + 8 + 4 + 8 > b.len() { return None; } i += 8; let new_shares=u32::from_le_bytes(b[i..i+4].try_into().ok()?) as f64; i+=4; let price_i=u64::from_le_bytes(b[i..i+8].try_into().ok()?) as f64; i+=8; let price=to_price_scaled(price_i*1e-4,self.tick,None,None); self.idx=i; let d=to_canonical(py, 0, "LO+", new_shares, price, None, &self.symbol, "OUCH", false).ok()?; return Some(d.into()); }
+                'E' => { if i + 8 + 4 > b.len() { return None; } i += 8; let executed=u32::from_le_bytes(b[i..i+4].try_into().ok()?) as f64; i+=4; self.idx=i; let d=to_canonical(py, 0, "MO+", executed, f64::NAN, None, &self.symbol, "OUCH", false).ok()?; return Some(d.into()); }
+                'X' => { if i + 8 + 4 > b.len() { return None; } i += 8; let canceled=u32::from_le_bytes(b[i..i+4].try_into().ok()?) as f64; i+=4; self.idx=i; let d=to_canonical(py, 0, "CX+", canceled, f64::NAN, None, &self.symbol, "OUCH", false).ok()?; return Some(d.into()); }
+                'D' => { self.idx=i; let d=to_canonical(py, 0, "CX+", 0.0, f64::NAN, None, &self.symbol, "OUCH", false).ok()?; return Some(d.into()); }
+                _ => { self.idx=i; continue; }
+            }
+        }
+        None
+    }
 }

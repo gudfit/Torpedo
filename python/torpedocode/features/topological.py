@@ -16,7 +16,6 @@ import numpy as np
 
 from ..config import TopologyConfig
 
-# Optional native acceleration hooks (CPU; future GPU variants can register same API)
 try:  # pragma: no cover - optional
     import torpedocode_tda as _tda_native  # type: ignore
 except Exception:  # pragma: no cover
@@ -28,7 +27,6 @@ class TopologicalFeatureGenerator:
     """Compute persistent homology descriptors from rolling windows."""
 
     config: TopologyConfig
-    # Internal active ranges for image normalization (populated per transform)
     _active_birth_range: Optional[Tuple[float, float]] = None
     _active_pers_range: Optional[Tuple[float, float]] = None
 
@@ -65,7 +63,6 @@ class TopologicalFeatureGenerator:
         if series.size == 0:
             return np.zeros((0, self._embedding_dim()), dtype=np.float32)
 
-        # Initialize active ranges from config by default
         self._active_birth_range = getattr(self.config, "image_birth_range", None)
         self._active_pers_range = getattr(self.config, "image_pers_range", None)
 
@@ -91,7 +88,6 @@ class TopologicalFeatureGenerator:
         for w in wlist:
             w_ns = int(w) * 1_000_000_000
             reps = np.zeros((T, self._embedding_dim()), dtype=np.float32)
-            # Optional two-pass for image auto-range: estimate birth/pers ranges on training windows
             use_image = self.config.persistence_representation == "image"
             need_auto = bool(getattr(self.config, "image_auto_range", False)) and (
                 getattr(self.config, "image_birth_range", None) is None
@@ -120,13 +116,11 @@ class TopologicalFeatureGenerator:
                         if self._strict():
                             raise
                         continue
-                # Robust ranges via 1st–99th percentiles
                 if births and pers:
                     with warnings.catch_warnings():
                         warnings.filterwarnings("ignore", message="invalid value encountered in subtract")
                         bmin, bmax = np.quantile(births, [0.01, 0.99]).astype(float)
                         pmin, pmax = np.quantile(pers, [0.01, 0.99]).astype(float)
-                    # store on config for this run
                     self._active_birth_range = (float(bmin), float(bmax))
                     self._active_pers_range = (float(pmin), float(pmax))
                 else:
@@ -141,7 +135,6 @@ class TopologicalFeatureGenerator:
                 j0 = int(np.searchsorted(ts_ns, left, side="right"))
                 slab = series[j0 : i + 1]
                 try:
-                    # If cubical and configured, build a liquidity surface from LOB sizes
                     if self.config.complex_type == "cubical" and getattr(
                         self.config, "use_liquidity_surface", True
                     ):
@@ -159,10 +152,8 @@ class TopologicalFeatureGenerator:
 
     def _embedding_dim(self) -> int:
         if self.config.persistence_representation == "landscape":
-            # Concatenate per-dimension landscapes (H0..Hmax)
             return self.config.landscape_levels * (self.config.max_homology_dimension + 1)
         if self.config.persistence_representation == "image":
-            # Return separate channels per homology dimension (no averaging)
             return (self.config.max_homology_dimension + 1) * (self.config.image_resolution**2)
         raise ValueError(f"Unsupported representation {self.config.persistence_representation}")
 
@@ -180,6 +171,12 @@ class TopologicalFeatureGenerator:
     def _ripser_diagrams(self, X: np.ndarray) -> List[np.ndarray]:
         if X.shape[0] < 3:
             return [np.zeros((0, 2)) for _ in range(self.config.max_homology_dimension + 1)]
+        if bool(getattr(self.config, "vr_zscore", True)):
+            Xc = X.copy().astype(float)
+            mu = np.nanmean(Xc, axis=0, keepdims=True)
+            sd = np.nanstd(Xc, axis=0, keepdims=True)
+            sd[sd == 0] = 1.0
+            X = (Xc - mu) / sd
         try:
             from ripser import ripser
         except Exception:
@@ -218,7 +215,6 @@ class TopologicalFeatureGenerator:
 
     def _estimate_vr_epsilon(self, X: np.ndarray, q: float = 0.99) -> float:
         """Estimate epsilon_max via MST edges so that ~q fraction of nodes are connected."""
-        # Try native acceleration if available
         if _tda_native is not None:
             try:
                 return float(_tda_native.estimate_vr_epsilon(np.asarray(X, dtype=float), float(q)))
@@ -268,7 +264,6 @@ class TopologicalFeatureGenerator:
         finite = D[np.isfinite(D)]
         if finite.size == 0:
             return 1.0
-        # Grid resolution configurable via TopologyConfig.vr_lcc_grid_size (default 25)
         g = max(5, int(getattr(self.config, "vr_lcc_grid_size", 25)))
         qs = np.linspace(0.01, 0.99, g)
         cand = np.quantile(finite, qs)
@@ -276,7 +271,6 @@ class TopologicalFeatureGenerator:
 
         def lcc_frac(eps: float) -> float:
             A = D <= eps
-            # undirected, add self to avoid empty rows
             np.fill_diagonal(A, True)
             visited = np.zeros(n, dtype=bool)
             best = 0
@@ -342,7 +336,6 @@ class TopologicalFeatureGenerator:
         T, F = slab.shape
         L = self.config.levels_hint
         if L is None:
-            # Infer L as min(levels where 2L <= F); prefer 10, 20, 40 if possible
             for cand in (10, 20, 40):
                 if 2 * cand <= F:
                     L = cand
@@ -353,9 +346,16 @@ class TopologicalFeatureGenerator:
         bids = slab[:, :L]
         asks = slab[:, L : 2 * L]
         eps = float(getattr(self.config, "imbalance_eps", 1e-6))
-        imb = (bids - asks) / (np.abs(bids) + np.abs(asks) + eps)
-        # Return as 2D array: time x levels
-        return imb.astype(np.float32)
+        field_type = getattr(self.config, "cubical_scalar_field", "imbalance")
+        if field_type == "bid":
+            surf = bids
+        elif field_type == "ask":
+            surf = asks
+        elif field_type == "net":
+            surf = bids - asks
+        else:  
+            surf = (bids - asks) / (np.abs(bids) + np.abs(asks) + eps)
+        return np.asarray(surf, dtype=np.float32)
 
     def _vectorise(self, diag: List[np.ndarray]) -> np.ndarray:
         if self.config.persistence_representation == "landscape":
@@ -398,7 +398,6 @@ class TopologicalFeatureGenerator:
                 )
                 pla.fit([np.stack([b, b + p], axis=1)])
                 _x, y = pla.plot_diagrams(return_data=True)
-            # Reduce over resolution to get one value per landscape level using configured summary
             if getattr(self.config, "landscape_summary", "mean") == "max":
                 red = np.nanmax(y, axis=1)
             else:
@@ -421,7 +420,6 @@ class TopologicalFeatureGenerator:
                 P = D[:, 1]
                 if B.size == 0:
                     continue
-                # Use active ranges if present
                 if hasattr(self, "_active_birth_range") and self._active_birth_range is not None:
                     b0, b1 = self._active_birth_range
                 else:
@@ -438,7 +436,6 @@ class TopologicalFeatureGenerator:
                     img[y, x] += 1.0
             return img.flatten()
 
-        # Determine ranges: prefer active ranges -> config ranges -> [0,1]
         b_range = getattr(self, "_active_birth_range", None) or getattr(
             self.config, "image_birth_range", None
         ) or (0.0, 1.0)
@@ -463,7 +460,6 @@ class TopologicalFeatureGenerator:
                     )
                 )
                 continue
-            # Sanitize and clip diagram to valid ranges to avoid NaNs in imager
             B = np.asarray(D[:, 0], dtype=float)
             P = np.asarray(D[:, 1], dtype=float)
             BP = np.stack([np.nan_to_num(B, nan=0.0), np.nan_to_num(P, nan=0.0)], axis=1)
@@ -479,7 +475,6 @@ class TopologicalFeatureGenerator:
                         dtype=np.float32,
                     )
             imgs.append(img.astype(np.float32))
-        # Concatenate per-dimension channels
         return np.concatenate([im.flatten() for im in imgs], axis=0)
 
 

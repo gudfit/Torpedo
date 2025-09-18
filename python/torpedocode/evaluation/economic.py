@@ -31,11 +31,16 @@ def kupiec_pof_test(exceedances: np.ndarray, alpha: float) -> float:
         k * (np.log(pi_hat + eps) - np.log(pi0 + eps))
         + (n - k) * (np.log(1 - pi_hat + eps) - np.log(1 - pi0 + eps))
     )
-    from math import erf, sqrt
+    try:
+        from scipy.stats import chi2  # type: ignore
 
-    z = float(np.sqrt(max(lr, 0.0)))
-    p = 1.0 - 0.5 * (1.0 + erf(z / np.sqrt(2.0)))
-    return float(2.0 * p)
+        return float(chi2.sf(max(lr, 0.0), df=1))
+    except Exception:
+        from math import erf
+
+        z = float(np.sqrt(max(lr, 0.0)))
+        p = 1.0 - 0.5 * (1.0 + erf(z / np.sqrt(2.0)))
+        return float(2.0 * p)
 
 
 def christoffersen_independence_test(exceedances: np.ndarray) -> float:
@@ -65,11 +70,16 @@ def christoffersen_independence_test(exceedances: np.ndarray) -> float:
     num = (1 - pi) ** (n00 + n10) * (pi ** (n01 + n11) + eps)
     den = ((1 - pi01) ** n00) * (pi01**n01 + eps) * ((1 - pi11) ** n10) * (pi11**n11 + eps)
     lr = -2.0 * np.log((num + eps) / (den + eps))
-    from math import erf
+    try:
+        from scipy.stats import chi2  # type: ignore
 
-    z = float(np.sqrt(max(lr, 0.0)))
-    p = 1.0 - 0.5 * (1.0 + erf(z / np.sqrt(2.0)))
-    return float(2.0 * p)
+        return float(chi2.sf(max(lr, 0.0), df=1))
+    except Exception:
+        from math import erf
+
+        z = float(np.sqrt(max(lr, 0.0)))
+        p = 1.0 - 0.5 * (1.0 + erf(z / np.sqrt(2.0)))
+        return float(2.0 * p)
 
 
 def choose_threshold_by_utility(
@@ -101,17 +111,7 @@ def realized_volatility(returns: np.ndarray, window: int = 50) -> np.ndarray:
     return out
 
 
-def _stationary_block_indices(n: int, L: float, rng: np.random.Generator) -> np.ndarray:
-    p = 1.0 / max(L, 1e-6)
-    idx = []
-    while len(idx) < n:
-        start = int(rng.integers(0, n))
-        k = int(rng.geometric(p))
-        for j in range(k):
-            idx.append((start + j) % n)
-            if len(idx) >= n:
-                break
-    return np.asarray(idx[:n], dtype=int)
+from .metrics import stationary_block_indices as _stationary_block_indices
 
 
 def block_bootstrap_var_es(

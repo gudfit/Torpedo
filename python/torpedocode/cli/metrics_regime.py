@@ -13,31 +13,28 @@ from pathlib import Path
 import numpy as np
 
 from ..evaluation.metrics import compute_classification_metrics
+from ..evaluation.io import load_preds_labels_csv, load_preds_labels_npz
 from ..evaluation.economic import realized_volatility
 import warnings
 
-try:  # suppress benign sklearn warnings when a split has one class
+try:
     from sklearn.exceptions import UndefinedMetricWarning as _UMW  # type: ignore
+
     warnings.filterwarnings("ignore", category=_UMW)
 except Exception:
     pass
 
 
-def _load_csv(path: Path):
-    import pandas as pd
-
-    df = pd.read_csv(path)
-    p = df["pred"].to_numpy(dtype=float)
-    y = df["label"].astype(int).to_numpy()
-    r = df["ret"].to_numpy(dtype=float) if "ret" in df.columns else None
-    return p, y, r
-
-
-def _load_npz(path: Path):
-    obj = np.load(path, allow_pickle=False)
-    p = obj["pred"]
-    y = obj["label"]
-    r = obj["ret"] if "ret" in obj else None
+def _load(path_csv: Path | None, path_npz: Path | None):
+    if path_csv is not None:
+        p, y, r, _p2 = load_preds_labels_csv(
+            path_csv, pred_col="pred", label_col="label", ret_col="ret"
+        )
+        return p, y, r
+    assert path_npz is not None
+    p, y, r, _p2 = load_preds_labels_npz(
+        path_npz, pred_key="pred", label_key="label", ret_key="ret"
+    )
     return p, y, r
 
 
@@ -49,15 +46,17 @@ def main():
     ap.add_argument("--output", type=Path, default=None)
     args = ap.parse_args()
 
-    p, y, r = _load_csv(args.input) if args.input is not None else _load_npz(args.npz)
+    p, y, r = _load(args.input, args.npz)
     out = {"overall": {}}
     m_all = compute_classification_metrics(p, y)
-    out["overall"].update({
-        "auroc": float(m_all.auroc),
-        "auprc": float(m_all.auprc),
-        "brier": float(m_all.brier),
-        "ece": float(m_all.ece),
-    })
+    out["overall"].update(
+        {
+            "auroc": float(m_all.auroc),
+            "auprc": float(m_all.auprc),
+            "brier": float(m_all.brier),
+            "ece": float(m_all.ece),
+        }
+    )
     if r is not None:
         rv = realized_volatility(r)
         med = float(np.median(rv))
@@ -67,7 +66,6 @@ def main():
             if np.any(mask):
                 yy = y[mask]
                 mm = compute_classification_metrics(p[mask], yy)
-                # Avoid NaN AUROC in degenerate splits: fallback to 0.5 when a single class present
                 if np.all(yy == 0) or np.all(yy == 1):
                     auroc = 0.5
                 else:
