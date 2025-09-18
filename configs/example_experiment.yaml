@@ -1,0 +1,35 @@
+seed: 42
+data:
+  raw_data_root: ./data/raw
+  cache_root: ./data/cache
+  instruments: ["AAPL", "MSFT"]
+  levels: 10
+  event_types: ["MO+", "MO-", "LO+", "LO-", "CX+", "CX-"]
+model:
+  hidden_size: 256
+  num_layers: 2
+  dropout: 0.1
+  include_market_embedding: true
+  intensity_smoothness_penalty: 0.0001
+  classifier_weight: 1.0
+  weight_decay: 0.0001
+training:
+  batch_size: 256
+  learning_rate: 0.0003
+  gradient_clipping: 1.0
+  max_epochs: 50
+  patience: 5
+  mixed_precision: true
+  use_cuda_extension: true
+  cuda_extension_name: torpedocode_kernels
+topology:
+  window_sizes_s: [1, 5, 10]
+  complex_type: cubical
+  max_homology_dimension: 1
+  persistence_representation: landscape
+  landscape_levels: 5
+  image_resolution: 64
+  image_bandwidth: 0.05
+  vr_epsilon_rule: largest_cc
+  use_liquidity_surface: true
+  use_raw_liquidity_surface: true

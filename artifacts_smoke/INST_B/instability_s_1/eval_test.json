@@ -1,0 +1,12 @@
+{
+  "auroc": 1.0,
+  "auroc_ci": [
+    NaN,
+    NaN
+  ],
+  "auprc": 1.0,
+  "brier": 0.27801952733881985,
+  "ece": 0.49529078006744376,
+  "instrument": "INST_B",
+  "label_key": "instability_s_1"
+}

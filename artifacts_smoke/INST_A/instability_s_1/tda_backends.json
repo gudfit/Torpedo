@@ -1,0 +1,14 @@
+{
+  "ripser": {
+    "available": true,
+    "version": "0.6.12"
+  },
+  "gudhi": {
+    "available": true,
+    "version": "3.11.0"
+  },
+  "persim": {
+    "available": true,
+    "version": "0.3.8"
+  }
+}

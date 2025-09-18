@@ -1,0 +1,24 @@
+[package]
+name = "torpedocode-ingest"
+version = "0.1.0"
+edition = "2021"
+authors = ["TorpedoCode Research"]
+description = "Streaming data ingestion utilities for TorpedoCode"
+license = "MIT"
+
+[lib]
+name = "torpedocode_ingest"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+chrono = { version = "0.4", features = ["serde", "clock"] }
+async-trait = "0.1"
+futures = "0.3"
+tokio = { version = "1.32", features = ["full"] }
+
+[features]
+default = ["runtime-tokio"]
+runtime-tokio = []

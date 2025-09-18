@@ -1,0 +1,35 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.dylib
+build/
+dist/
+.eggs/
+*.egg-info/
+artifacts/
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tmp/
+.ipynb_checkpoints/
+.DS_Store
+.env
+.venv/
+.uv/
+*.parquet
+data/
+logs/
+*.log
+*.ndjson
+*.jsonl
+
+# Rust build artifacts
+/rust/torpedocode-ingest/target/
+/rust/torpedocode-py/target/
+/rust/torpedocode-panel/target/
+
+# C++ build artifacts
+/cpp/build/
