@@ -19,6 +19,7 @@ APT_PACKAGES = [
     "curl",
     "vim",
     "cmake",
+    # cargo via rustup preferred; leave here for minimal systems that package it
     "cargo",
 ]
 
@@ -81,7 +82,15 @@ def _torch_cuda_available(python_bin: str) -> bool | None:
         return None
 
 
-def setup(env_dir: Path, *, dev: bool, cuda: bool | None, rust: bool = True) -> None:
+def setup(
+    env_dir: Path,
+    *,
+    dev: bool,
+    cuda: bool | None,
+    rust: bool = True,
+    install_pyarrow: bool = False,
+    cuda_arch: str | None = None,
+) -> None:
     env_dir.mkdir(parents=True, exist_ok=True)
     venv_dir = env_dir / ".venv"
     uv_bin = shutil.which("uv")
@@ -114,6 +123,8 @@ def setup(env_dir: Path, *, dev: bool, cuda: bool | None, rust: bool = True) -> 
             sh([py, "-m", "pip", "install", "maturin"])
 
     # Build native components
+    # Deny warnings for Rust builds to keep artifacts clean
+    os.environ.setdefault("RUSTFLAGS", "-D warnings")
     sh([py, "scripts/build_native.py", "rust", "--verbose"])
     sh([py, "scripts/build_native.py", "panel", "--verbose"])
     # Decide CUDA vs CPU for torch extension
@@ -122,11 +133,32 @@ def setup(env_dir: Path, *, dev: bool, cuda: bool | None, rust: bool = True) -> 
         cuda_decision = _torch_cuda_available(py)
     if cuda_decision:
         os.environ.setdefault("TORCH_EXTENSIONS_DIR", str(env_dir / ".tmp/torch_extensions"))
+        if cuda_arch:
+            os.environ.setdefault("TORCH_CUDA_ARCH_LIST", str(cuda_arch))
         print("[build] Building Torch CUDA extension (auto)")
         sh([py, "scripts/build_native.py", "torch-cuda", "--verbose"])
     else:
         print("[build] Building Torch CPU extension")
         sh([py, "scripts/build_native.py", "torch", "--verbose"])
+
+    # Optional: install pyarrow for parquet support and smoke scripts
+    if install_pyarrow:
+        if uv_bin:
+            sh([uv_bin, "pip", "install", "pyarrow", "--python", py])
+        else:
+            sh([py, "-m", "pip", "install", "pyarrow"])
+
+    # Sanity checks: try importing native modules
+    try:
+        out = subprocess.check_output([py, "-c", "import torpedocode_ingest; print('torpedocode_ingest OK')"], text=True).strip()
+        print(out)
+    except Exception as e:
+        print(f"[check] torpedocode_ingest import failed: {e}")
+    try:
+        out = subprocess.check_output([py, "-c", "import torpedocode_tda; print('torpedocode_tda OK')"], text=True).strip()
+        print(out)
+    except Exception as e:
+        print(f"[check] torpedocode_tda import failed: {e}")
 
 
 def main():
@@ -154,6 +186,17 @@ def main():
         action="store_true",
         help="Force install Rust toolchain (cargo) if missing",
     )
+    ap.add_argument(
+        "--pyarrow",
+        action="store_true",
+        help="Install pyarrow for parquet support and paper smoke scripts",
+    )
+    ap.add_argument(
+        "--cuda-arch",
+        type=str,
+        default=None,
+        help="Optional TORCH_CUDA_ARCH_LIST value (e.g., '90' or '89;90')",
+    )
     args = ap.parse_args()
 
     if args.apt:
@@ -178,6 +221,8 @@ def main():
         dev=bool(args.dev),
         cuda=False if cuda_policy is False else bool(cuda_policy),  # placeholder; may auto-switch later
         rust=(True if args.rust else (not bool(args.no_rust))),
+        install_pyarrow=bool(args.pyarrow),
+        cuda_arch=args.cuda_arch,
     )
 
 

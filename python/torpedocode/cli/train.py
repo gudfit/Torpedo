@@ -121,11 +121,12 @@ def _predict_sequence(
 ) -> np.ndarray:
     model.eval()
     with torch.no_grad():
-        xb = torch.from_numpy(X)[None, ...].to(device)
-        zb = torch.from_numpy(Z)[None, ...].to(device)
+        dev = next(model.parameters()).device
+        xb = torch.from_numpy(X)[None, ...].to(dev)
+        zb = torch.from_numpy(Z)[None, ...].to(dev)
         extra = {}
         if market_id is not None:
-            extra["market_ids"] = torch.tensor([market_id], dtype=torch.long, device=device)
+            extra["market_ids"] = torch.tensor([market_id], dtype=torch.long, device=dev)
         out = model(xb, zb, **extra)
         logits = out.instability_logits[0].detach().cpu().numpy().reshape(-1)
         if temperature is not None and float(temperature) > 0:
@@ -139,11 +140,12 @@ def _predict_logits_and_intensities(
     """Return (logits[T], intensities[T,M]) for one sequence."""
     model.eval()
     with torch.no_grad():
-        xb = torch.from_numpy(X)[None, ...].to(device)
-        zb = torch.from_numpy(Z)[None, ...].to(device)
+        dev = next(model.parameters()).device
+        xb = torch.from_numpy(X)[None, ...].to(dev)
+        zb = torch.from_numpy(Z)[None, ...].to(dev)
         extra = {}
         if market_id is not None:
-            extra["market_ids"] = torch.tensor([market_id], dtype=torch.long, device=device)
+            extra["market_ids"] = torch.tensor([market_id], dtype=torch.long, device=dev)
         out = model(xb, zb, **extra)
         logits = out.instability_logits[0].detach().cpu().numpy().reshape(-1)
         heads = [out.intensities[f"event_{i}"] for i in range(len(out.intensities))]
