@@ -171,6 +171,7 @@ def main():
             "panel",
             "check",
             "torch-install",
+            "fast-eval",
         ],
         help="What to build",
     )
@@ -230,6 +231,19 @@ def main():
         build_torch(cuda=True, verbose=args.verbose)
     if args.component in ("all", "lobster"):
         build_lobster_fast(verbose=args.verbose)
+    if args.component in ("all", "fast-eval"):
+        # local build of C++ fast evaluator
+        bin_path = ROOT / "cpp" / "fast_eval"
+        src = ROOT / "cpp" / "src" / "fast_eval.cpp"
+        if src.exists():
+            flags = ["g++", "-O3", "-march=native", "-ffast-math", "-std=c++17"]
+            if os.environ.get("FAST_EVAL_OPENMP", "0").lower() in {"1", "true"}:
+                flags.append("-fopenmp")
+            flags += ["-o", str(bin_path), str(src)]
+            _ = run(flags, verbose=args.verbose)
+            print(f"[fast-eval] Built {bin_path if bin_path.exists() else '(failed)'}")
+        else:
+            print("[fast-eval] Source not found; skipping")
     if args.component in ("all", "panel"):
         build_panel(verbose=args.verbose)
 

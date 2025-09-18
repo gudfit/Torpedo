@@ -31,6 +31,8 @@ def main():
         raw_data_root=args.cache_root, cache_root=args.cache_root, instruments=[args.instrument]
     )
     builder = LOBDatasetBuilder(data)
+    import os as _os
+    env_strict = _os.environ.get("PAPER_TORPEDO_STRICT_TDA", "0").lower() in {"1", "true"}
 
     window_sizes = [[1], [5], [10]]
     reps = ["landscape", "image"]
@@ -48,7 +50,7 @@ def main():
                         window_sizes_s=ws,
                         persistence_representation="landscape",
                         landscape_levels=K,
-                        strict_tda=bool(args.strict_tda),
+                        strict_tda=(bool(args.strict_tda) or env_strict),
                     )
                     tr, va, _, _ = builder.build_splits(
                         args.instrument,
@@ -72,7 +74,7 @@ def main():
                             persistence_representation="image",
                             image_resolution=res,
                             image_bandwidth=bw,
-                            strict_tda=bool(args.strict_tda),
+                            strict_tda=(bool(args.strict_tda) or env_strict),
                         )
                         tr, va, _, _ = builder.build_splits(
                             args.instrument,

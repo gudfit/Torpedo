@@ -86,7 +86,12 @@ class LOBPreprocessor:
                     )
                     if df is None:
                         df = parse_itch_minimal(
-                            file, cfg=ITCHParseConfig(tick_size=tick_size, symbol=instrument)
+                            file,
+                            cfg=ITCHParseConfig(
+                                tick_size=tick_size,
+                                symbol=instrument,
+                                side_aware=bool(getattr(self.config, "side_aware_events", False)),
+                            ),
                         )
                     frames.append(df)
                     used.add(idx)
@@ -102,7 +107,12 @@ class LOBPreprocessor:
                     )
                     if df is None:
                         df = parse_ouch_minimal(
-                            file, cfg=OUCHParseConfig(tick_size=tick_size, symbol=instrument)
+                            file,
+                            cfg=OUCHParseConfig(
+                                tick_size=tick_size,
+                                symbol=instrument,
+                                side_aware=bool(getattr(self.config, "side_aware_events", False)),
+                            ),
                         )
                     frames.append(df)
                     used.add(idx)
@@ -125,7 +135,11 @@ class LOBPreprocessor:
                             df = parse_lobster_pair(
                                 file,
                                 other,
-                                cfg=LOBSTERParseConfig(tick_size=tick_size, symbol=instrument),
+                                cfg=LOBSTERParseConfig(
+                                    tick_size=tick_size,
+                                    symbol=instrument,
+                                    side_aware=bool(getattr(self.config, "side_aware_events", False)),
+                                ),
                             )
                             frames.append(df)
                             used.update({idx, j})
@@ -141,7 +155,11 @@ class LOBPreprocessor:
                             df = parse_lobster_pair(
                                 other,
                                 file,
-                                cfg=LOBSTERParseConfig(tick_size=tick_size, symbol=instrument),
+                                cfg=LOBSTERParseConfig(
+                                    tick_size=tick_size,
+                                    symbol=instrument,
+                                    side_aware=bool(getattr(self.config, "side_aware_events", False)),
+                                ),
                             )
                             frames.append(df)
                             used.update({idx, j})

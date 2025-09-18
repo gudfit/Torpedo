@@ -296,6 +296,14 @@ def main():
             topo_cfg.strict_tda = True  # type: ignore[attr-defined]
         except Exception:
             pass
+    else:
+        # Paper default via env: PAPER_TORPEDO_STRICT_TDA=1 forces strict TDA
+        import os as _os
+        if _os.environ.get("PAPER_TORPEDO_STRICT_TDA", "0").lower() in {"1", "true"}:
+            try:
+                topo_cfg.strict_tda = True  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
     folds = max(1, int(args.folds))
     if folds == 1:

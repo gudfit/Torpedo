@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import warnings
-from typing import Optional, Tuple, Iterable
+from typing import Optional, Tuple, Iterable, List
 
 import numpy as np
 
@@ -28,6 +28,9 @@ class TopologicalFeatureGenerator:
     """Compute persistent homology descriptors from rolling windows."""
 
     config: TopologyConfig
+    # Internal active ranges for image normalization (populated per transform)
+    _active_birth_range: Optional[Tuple[float, float]] = None
+    _active_pers_range: Optional[Tuple[float, float]] = None
 
     def transform(self, tensor: np.ndarray) -> np.ndarray:
         """Convert liquidity windows into vectorised persistence summaries."""
@@ -62,6 +65,10 @@ class TopologicalFeatureGenerator:
         if series.size == 0:
             return np.zeros((0, self._embedding_dim()), dtype=np.float32)
 
+        # Initialize active ranges from config by default
+        self._active_birth_range = getattr(self.config, "image_birth_range", None)
+        self._active_pers_range = getattr(self.config, "image_pers_range", None)
+
         ts = np.asarray(timestamps)
         if np.issubdtype(ts.dtype, np.datetime64):
             ts_ns = ts.astype("datetime64[ns]").astype("int64")
@@ -84,6 +91,51 @@ class TopologicalFeatureGenerator:
         for w in wlist:
             w_ns = int(w) * 1_000_000_000
             reps = np.zeros((T, self._embedding_dim()), dtype=np.float32)
+            # Optional two-pass for image auto-range: estimate birth/pers ranges on training windows
+            use_image = self.config.persistence_representation == "image"
+            need_auto = bool(getattr(self.config, "image_auto_range", False)) and (
+                getattr(self.config, "image_birth_range", None) is None
+                or getattr(self.config, "image_pers_range", None) is None
+            )
+            births: List[float] = []
+            pers: List[float] = []
+            if use_image and need_auto:
+                for i in range(0, T, max(1, int(stride))):
+                    left = ts_ns[i] - w_ns
+                    j0 = int(np.searchsorted(ts_ns, left, side="right"))
+                    slab = series[j0 : i + 1]
+                    try:
+                        if self.config.complex_type == "cubical" and getattr(
+                            self.config, "use_liquidity_surface", True
+                        ):
+                            field = self._liquidity_surface_field(slab)
+                            diags = self._compute_diagram(field)
+                        else:
+                            diags = self._compute_diagram(slab)
+                        for D in diags[: self.config.max_homology_dimension + 1]:
+                            if isinstance(D, np.ndarray) and D.size:
+                                births.extend((D[:, 0]).tolist())
+                                pers.extend((D[:, 1]).tolist())
+                    except Exception:
+                        if self._strict():
+                            raise
+                        continue
+                # Robust ranges via 1st–99th percentiles
+                if births and pers:
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings("ignore", message="invalid value encountered in subtract")
+                        bmin, bmax = np.quantile(births, [0.01, 0.99]).astype(float)
+                        pmin, pmax = np.quantile(pers, [0.01, 0.99]).astype(float)
+                    # store on config for this run
+                    self._active_birth_range = (float(bmin), float(bmax))
+                    self._active_pers_range = (float(pmin), float(pmax))
+                else:
+                    self._active_birth_range = None
+                    self._active_pers_range = None
+            else:
+                self._active_birth_range = getattr(self.config, "image_birth_range", None)
+                self._active_pers_range = getattr(self.config, "image_pers_range", None)
+
             for i in range(0, T, max(1, int(stride))):
                 left = ts_ns[i] - w_ns
                 j0 = int(np.searchsorted(ts_ns, left, side="right"))
@@ -94,10 +146,10 @@ class TopologicalFeatureGenerator:
                         self.config, "use_liquidity_surface", True
                     ):
                         field = self._liquidity_surface_field(slab)
-                        diag = self._compute_diagram(field)
+                        diags = self._compute_diagram(field)
                     else:
-                        diag = self._compute_diagram(slab)
-                    reps[i] = self._vectorise(diag)
+                        diags = self._compute_diagram(slab)
+                    reps[i] = self._vectorise(diags)
                 except Exception:
                     if self._strict():
                         raise
@@ -114,8 +166,8 @@ class TopologicalFeatureGenerator:
             return (self.config.max_homology_dimension + 1) * (self.config.image_resolution**2)
         raise ValueError(f"Unsupported representation {self.config.persistence_representation}")
 
-    def _compute_diagram(self, slab: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Return diagrams for H0..Hmax as a tuple (H0, H1[, ...])."""
+    def _compute_diagram(self, slab: np.ndarray) -> List[np.ndarray]:
+        """Return diagrams for H0..Hmax as a list [H0, H1, ...]."""
         if self.config.complex_type == "vietoris_rips":
             X = np.atleast_2d(slab)
             return self._ripser_diagrams(X)
@@ -125,15 +177,15 @@ class TopologicalFeatureGenerator:
         else:
             raise ValueError(f"Unsupported complex_type {self.config.complex_type}")
 
-    def _ripser_diagrams(self, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def _ripser_diagrams(self, X: np.ndarray) -> List[np.ndarray]:
         if X.shape[0] < 3:
-            return (np.zeros((0, 2)), np.zeros((0, 2)))
+            return [np.zeros((0, 2)) for _ in range(self.config.max_homology_dimension + 1)]
         try:
             from ripser import ripser
         except Exception:
             if self._strict():
                 raise RuntimeError("ripser not available and TORPEDOCODE_STRICT_TDA=1")
-            return (np.zeros((0, 2)), np.zeros((0, 2)))
+            return [np.zeros((0, 2)) for _ in range(self.config.max_homology_dimension + 1)]
         ripser_kwargs = {"maxdim": self.config.max_homology_dimension, "metric": "euclidean"}
         if self.config.vr_auto_epsilon and X.shape[0] >= 2:
             if getattr(self.config, "vr_epsilon_rule", "mst_quantile") == "largest_cc":
@@ -154,7 +206,7 @@ class TopologicalFeatureGenerator:
             )
             res = ripser(X, **ripser_kwargs)
         diagrams = res.get("dgms", [])
-        out = []
+        out: List[np.ndarray] = []
         for d in range(self.config.max_homology_dimension + 1):
             if d < len(diagrams):
                 D = diagrams[d]
@@ -162,9 +214,7 @@ class TopologicalFeatureGenerator:
                 out.append(bp)
             else:
                 out.append(np.zeros((0, 2)))
-        while len(out) < 2:
-            out.append(np.zeros((0, 2)))
-        return out[0], out[1]
+        return out
 
     def _estimate_vr_epsilon(self, X: np.ndarray, q: float = 0.99) -> float:
         """Estimate epsilon_max via MST edges so that ~q fraction of nodes are connected."""
@@ -257,13 +307,13 @@ class TopologicalFeatureGenerator:
                 break
         return float(out)
 
-    def _cubical_diagrams(self, field: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def _cubical_diagrams(self, field: np.ndarray) -> List[np.ndarray]:
         try:
             import gudhi as gd  # type: ignore
         except Exception:
             if self._strict():
                 raise RuntimeError("gudhi not available and TORPEDOCODE_STRICT_TDA=1")
-            return (np.zeros((0, 2)), np.zeros((0, 2)))
+            return [np.zeros((0, 2)) for _ in range(self.config.max_homology_dimension + 1)]
 
         cc = gd.CubicalComplex(dimensions=field.shape, top_dimensional_cells=field.flatten())
         cc.persistence()
@@ -271,7 +321,7 @@ class TopologicalFeatureGenerator:
             np.array(cc.persistence_generators_in_dimension(d) or [])
             for d in range(self.config.max_homology_dimension + 1)
         ]
-        out = []
+        out: List[np.ndarray] = []
         for d, D in enumerate(dgms):
             if D.size == 0:
                 out.append(np.zeros((0, 2)))
@@ -280,9 +330,7 @@ class TopologicalFeatureGenerator:
                 D = D.reshape(-1, 2)
             bp = np.stack([D[:, 0], D[:, 1] - D[:, 0]], axis=1)
             out.append(bp)
-        while len(out) < 2:
-            out.append(np.zeros((0, 2)))
-        return out[0], out[1]
+        return out
 
     def _liquidity_surface_field(self, slab: np.ndarray) -> np.ndarray:
         """Construct a 2D price-level x time imbalance surface from base LOB sizes.
@@ -309,7 +357,7 @@ class TopologicalFeatureGenerator:
         # Return as 2D array: time x levels
         return imb.astype(np.float32)
 
-    def _vectorise(self, diag: Tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+    def _vectorise(self, diag: List[np.ndarray]) -> np.ndarray:
         if self.config.persistence_representation == "landscape":
             return self._landscape(diag)
         elif self.config.persistence_representation == "image":
@@ -317,7 +365,7 @@ class TopologicalFeatureGenerator:
         else:
             raise ValueError(f"Unsupported representation {self.config.persistence_representation}")
 
-    def _landscape(self, diag: Tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+    def _landscape(self, diag: List[np.ndarray]) -> np.ndarray:
         try:
             from persim import PersLandscapeApprox
         except Exception:
@@ -350,11 +398,15 @@ class TopologicalFeatureGenerator:
                 )
                 pla.fit([np.stack([b, b + p], axis=1)])
                 _x, y = pla.plot_diagrams(return_data=True)
-            # Reduce over resolution to get one value per landscape level
-            grids.append(np.nanmax(y, axis=1).astype(np.float32))
+            # Reduce over resolution to get one value per landscape level using configured summary
+            if getattr(self.config, "landscape_summary", "mean") == "max":
+                red = np.nanmax(y, axis=1)
+            else:
+                red = np.nanmean(y, axis=1)
+            grids.append(red.astype(np.float32))
         return np.concatenate(grids, axis=0)
 
-    def _image(self, diag: Tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+    def _image(self, diag: List[np.ndarray]) -> np.ndarray:
         try:
             from persim import PersistenceImager
         except Exception:
@@ -369,18 +421,38 @@ class TopologicalFeatureGenerator:
                 P = D[:, 1]
                 if B.size == 0:
                     continue
-                bi = np.clip((B - B.min()) / (B.ptp() + 1e-8) * (res - 1), 0, res - 1).astype(int)
-                pi = np.clip((P - P.min()) / (P.ptp() + 1e-8) * (res - 1), 0, res - 1).astype(int)
+                # Use active ranges if present
+                if hasattr(self, "_active_birth_range") and self._active_birth_range is not None:
+                    b0, b1 = self._active_birth_range
+                else:
+                    b0, b1 = float(np.min(B)), float(np.max(B))
+                if hasattr(self, "_active_pers_range") and self._active_pers_range is not None:
+                    p0, p1 = self._active_pers_range
+                else:
+                    p0, p1 = float(np.min(P)), float(np.max(P))
+                denom_b = (b1 - b0) if (b1 - b0) > 1e-8 else 1.0
+                denom_p = (p1 - p0) if (p1 - p0) > 1e-8 else 1.0
+                bi = np.clip(((B - b0) / denom_b) * (res - 1), 0, res - 1).astype(int)
+                pi = np.clip(((P - p0) / denom_p) * (res - 1), 0, res - 1).astype(int)
                 for x, y in zip(bi, pi):
                     img[y, x] += 1.0
             return img.flatten()
 
-        pim = PersistenceImager(
-            pixel_size=1.0 / self.config.image_resolution,
-            birth_range=(0, 1),
-            pers_range=(0, 1),
-            kernel_params={"sigma": self.config.image_bandwidth},
-        )
+        # Determine ranges: prefer active ranges -> config ranges -> [0,1]
+        b_range = getattr(self, "_active_birth_range", None) or getattr(
+            self.config, "image_birth_range", None
+        ) or (0.0, 1.0)
+        p_range = getattr(self, "_active_pers_range", None) or getattr(
+            self.config, "image_pers_range", None
+        ) or (0.0, 1.0)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="invalid value encountered in subtract")
+            pim = PersistenceImager(
+                pixel_size=1.0 / self.config.image_resolution,
+                birth_range=tuple(map(float, b_range)),
+                pers_range=tuple(map(float, p_range)),
+                kernel_params={"sigma": self.config.image_bandwidth},
+            )
         imgs = []
         for D in diag[: self.config.max_homology_dimension + 1]:
             if D.size == 0:
@@ -395,8 +467,8 @@ class TopologicalFeatureGenerator:
             B = np.asarray(D[:, 0], dtype=float)
             P = np.asarray(D[:, 1], dtype=float)
             BP = np.stack([np.nan_to_num(B, nan=0.0), np.nan_to_num(P, nan=0.0)], axis=1)
-            BP[:, 0] = np.clip(BP[:, 0], 0.0, 1.0)
-            BP[:, 1] = np.clip(BP[:, 1], 0.0, 1.0)
+            BP[:, 0] = np.clip(BP[:, 0], float(b_range[0]), float(b_range[1]))
+            BP[:, 1] = np.clip(BP[:, 1], float(p_range[0]), float(p_range[1]))
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore")
                 try:

@@ -57,6 +57,13 @@ def main():
         help="Decision threshold for de-risking; if omitted, choose by utility",
     )
     ap.add_argument(
+        "--threshold-objective",
+        type=str,
+        default="utility",
+        choices=["utility", "var_exceed", "es"],
+        help="Objective for threshold selection: maximize utility, or minimize VaR exceedances, or minimize ES",
+    )
+    ap.add_argument(
         "--grid",
         action="store_true",
         help="Evaluate a percentile grid of thresholds in addition to single best",
@@ -97,11 +104,25 @@ def main():
             raise SystemExit("predictions and returns must have the same length")
         p, r = pr, rr
     y = (r < 0).astype(int)
-    t = (
-        float(args.threshold)
-        if args.threshold is not None
-        else choose_threshold_by_utility(p, y, w_pos=float(args.w_pos), w_neg=float(args.w_neg))
-    )
+    if args.threshold is not None:
+        t = float(args.threshold)
+    elif args.threshold_objective == "utility":
+        t = choose_threshold_by_utility(p, y, w_pos=float(args.w_pos), w_neg=float(args.w_neg))
+    else:
+        # Grid-based selection for risk objectives
+        grid = sorted({min(max(int(q), 0), 100) for q in [50, 60, 70, 80, 90, 95]})
+        cand = [float(np.quantile(p, q / 100.0)) for q in grid]
+        def _score(th: float) -> float:
+            act = (p >= th).astype(int)
+            r_prot = r * (1 - act)
+            v, e = var_es(r_prot, alpha=float(args.alpha))
+            return float(np.sum((-r_prot) > v)) if args.threshold_objective == "var_exceed" else float(e)
+        best = None
+        for th in cand:
+            s = _score(th)
+            if best is None or s < best[0]:
+                best = (s, th)
+        t = float(best[1]) if best is not None else float(np.median(p))
     action = (p >= t).astype(int)
     r_prot = r * (1 - action)
     std_raw = float(np.std(r)) if r.size else 1.0

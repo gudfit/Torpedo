@@ -82,9 +82,17 @@ def compute_classification_metrics(
     # Brier
     brier = float(np.mean((p - y) ** 2))
 
-    # ECE
-    calib = compute_calibration_report(p, y, num_bins=15)
-    weights = np.full_like(calib.bin_confidence, fill_value=1.0 / len(calib.bin_confidence))
+    # ECE (equal-frequency bins but weight by actual bin sizes to match definition)
+    num_bins = 15
+    calib = compute_calibration_report(p, y, num_bins=num_bins)
+    n = len(p)
+    # Reconstruct bin sizes used in compute_calibration_report (equal frequency with remainder)
+    base = n // num_bins
+    rem = n % num_bins
+    bin_sizes = np.full(num_bins, base, dtype=float)
+    if rem > 0:
+        bin_sizes[:rem] += 1.0
+    weights = bin_sizes / float(max(n, 1))
     ece = float(np.sum(np.abs(calib.bin_accuracy - calib.bin_confidence) * weights))
 
     return ClassificationMetrics(auroc=auroc, auprc=auprc, brier=brier, ece=ece)
@@ -492,7 +500,7 @@ def _auprc_numpy(p: np.ndarray, y: np.ndarray) -> float:
     fp = np.cumsum(y_sorted == 0)
     precision = tp / np.maximum(tp + fp, 1)
     recall = tp / max(int((y == 1).sum()), 1)
-    return float(np.trapezoid(precision, recall))
+    return float(np.trapz(precision, recall))
 
 
 def _ks_statistic(u: np.ndarray) -> float:

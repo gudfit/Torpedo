@@ -34,6 +34,8 @@ class DataConfig:
     corporate_actions_factor_col: str = "adj_factor"
     corporate_actions_mode: Literal["multiply", "divide"] = "divide"
     instability_threshold_eta: float = 0.0
+    # Optional: emit side-aware MO±/CX± event codes when data contains side
+    side_aware_events: bool = False
 
 
 @dataclass(slots=True)
@@ -45,8 +47,14 @@ class TopologyConfig:
     max_homology_dimension: int = 1
     persistence_representation: Literal["landscape", "image"] = "landscape"
     landscape_levels: int = 5
+    # Summary across the landscape grid per level; using 'mean' is more stable than 'max'.
+    landscape_summary: Literal["mean", "max"] = "mean"
     image_resolution: int = 64
     image_bandwidth: float = 0.05
+    # Image normalization ranges; if None and image_auto_range=True, estimated on train split
+    image_auto_range: bool = True
+    image_birth_range: tuple[float, float] | None = None
+    image_pers_range: tuple[float, float] | None = None
     strict_tda: bool = False
     vr_auto_epsilon: bool = True
     vr_connectivity_quantile: float = 0.99

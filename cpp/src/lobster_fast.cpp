@@ -49,20 +49,22 @@ static inline bool parse_message_row(const std::string &line, MessageRow &out) {
   return true;
 }
 
-static inline std::string map_event_type(int t) {
+static inline std::string map_event_type(int t, int direction) {
+  // direction: 1=buy (bid), -1=sell (ask)
+  const char sign = (direction == -1) ? '-' : '+';
   switch (t) {
   case 1: // add
   case 2: // modify
-    return "LO+";
+    return std::string("LO") + sign;
   case 3: // cancel
   case 6: // delete
-    return "CX+";
+    return std::string("CX") + sign;
   case 4: // execute
   case 5: // execute hidden
   case 7: // trade
-    return "MO+";
+    return std::string("MO") + sign;
   default:
-    return "LO+";
+    return std::string("LO") + sign;
   }
 }
 
@@ -100,8 +102,39 @@ int main(int argc, char **argv) {
     if (tick > 0.0) {
       price = std::floor((price / tick) + 0.5) * tick;
     }
-    std::cout << ns << "," << map_event_type(m.type) << "," << price << ","
-              << m.size << ",," << side << "," << symbol << ",LOBSTER\n";
+    // Attempt level inference by matching price to nearest level in orderbook snapshot
+    int level = 0;
+    try {
+      std::vector<double> fields;
+      fields.reserve(128);
+      std::stringstream ssb(bline);
+      std::string cell;
+      while (std::getline(ssb, cell, ',')) {
+        fields.push_back(std::atof(cell.c_str()));
+      }
+      int L = (int)(fields.size() / 4);
+      auto approx_eq = [&](double a, double b) {
+        double tol = (tick > 0.0) ? (0.5 * tick) : 1e-9;
+        return std::fabs(a - b) <= tol;
+      };
+      if (L > 0) {
+        if (side == 'S') {
+          for (int l = 1; l <= L; ++l) {
+            double ask_p = fields[2 * (l - 1)];
+            if (approx_eq(ask_p, price)) { level = l; break; }
+          }
+        } else {
+          for (int l = 1; l <= L; ++l) {
+            double bid_p = fields[2 * L + 2 * (l - 1)];
+            if (approx_eq(bid_p, price)) { level = l; break; }
+          }
+        }
+      }
+    } catch (...) { level = 0; }
+
+    std::cout << ns << "," << map_event_type(m.type, m.direction) << "," << price << ","
+              << m.size << "," << (level > 0 ? std::to_string(level) : std::string(""))
+              << "," << side << "," << symbol << ",LOBSTER\n";
   }
   return 0;
 }

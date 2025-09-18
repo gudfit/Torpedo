@@ -51,6 +51,7 @@ class OUCHParseConfig:
     price_scale: float = 1e-4
     symbol: Optional[str] = None
     venue: Optional[str] = "OUCH"
+    side_aware: bool = False
 
 
 def _read_exact(b: io.BufferedReader, n: int) -> bytes:

@@ -54,6 +54,7 @@ class ITCHParseConfig:
     price_scale: float = 1e-4  # incoming integer price units
     symbol: Optional[str] = None
     venue: Optional[str] = "ITCH"
+    side_aware: bool = False
 
 
 def _read_exact(b: io.BufferedReader, n: int) -> bytes:
@@ -151,10 +152,11 @@ def parse_itch_minimal(path: Path | str, *, cfg: ITCHParseConfig) -> pd.DataFram
                 shares = struct.unpack("<I", _read_exact(bio, 4))[0]
                 price_i = struct.unpack("<Q", _read_exact(bio, 8))[0]
                 price = float(price_i) * cfg.price_scale
+                # Map MO sign using side when present (trade)
                 records.append(
                     {
                         "timestamp": pd.to_datetime(ts_ns, unit="ns", utc=True),
-                        "event_type": "MO+",
+                        "event_type": (f"MO{('+' if side == 'B' else '-')}" if cfg.side_aware else "MO+"),
                         "size": float(shares),
                         "price": price,
                         "level": np.nan,

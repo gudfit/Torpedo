@@ -151,3 +151,26 @@ Manual quick commands (if you prefer)
 - `pytest -q`
 - `uv pip install pyarrow`
 - `make ci-regime-smoke`
+
+## Event Mapping Notes (LOBSTER/ITCH/OUCH)
+
+- Side-aware signs (MO±/CX±):
+  - Python LOBSTER parser and the C++ `lobster_fast` now emit `MO+` for buy and `MO-` for sell trades (and similarly for `CX±`) when side is available. Enables optional use of the canonical set {MO±, LO±_ℓ, CX±_ℓ} described in the paper.
+  - Enable via `DataConfig(side_aware_events=True)` for ingestion; otherwise default (+) mapping is kept for backward compatibility.
+- Level tagging for LOBSTER:
+  - Python and C++ LOBSTER paths attempt to infer the `level` by matching the message price to the nearest book level on the same row (within 0.5 tick). This is best‑effort and depends on input alignment.
+  - Use `--expand-types-by-level` in training to expand `LO/CX` types to `type@level` as needed.
+- ITCH/OUCH:
+  - ITCH minimal parser sets `MO±` on trade messages using the side bit when present.
+  - OUCH minimal parser sets `LO±` by side; other messages are mapped with default signs due to limited payload. Extending full side tracking requires a deeper order book reconstruction (future work).
+
+## Fast Evaluation (Wizard)
+
+- The wizard’s fast evaluation avoids subprocess overhead and computes metrics in‑process. It uses:
+  - AUROC, AUPRC, Brier, ECE, and optional paired DeLong comparison when a sibling predictions file is detected.
+  - A progress bar via `tqdm` if installed (`pip install tqdm`).
+  - Output JSON: `eval_fast.json` alongside `predictions_test.csv`.
+  - Optional native path: set `FAST_EVAL_BIN` to point to a built C++ tool (`cpp/src/fast_eval.cpp`) to compute single‑model metrics quickly:
+    - `g++ -O3 -std=c++17 -o cpp/fast_eval cpp/src/fast_eval.cpp`
+    - `export FAST_EVAL_BIN=$PWD/cpp/fast_eval`
+    - Wizard will use it when no paired comparison is needed.

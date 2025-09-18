@@ -73,7 +73,12 @@ def main():
     tr, va, te, scaler = builder.build_splits(
         args.instrument,
         label_key=f"instability_s_{int(args.horizon_s)}",
-        topology=TopologyConfig(window_sizes_s=[int(args.topo_window_s)], strict_tda=bool(args.strict_tda)),
+        topology=TopologyConfig(
+            window_sizes_s=[int(args.topo_window_s)],
+            strict_tda=(bool(args.strict_tda) or (
+                __import__('os').environ.get('PAPER_TORPEDO_STRICT_TDA', '0').lower() in {'1','true'}
+            )),
+        ),
         topo_stride=1,
         artifact_dir=None,
     )

@@ -260,6 +260,24 @@ class LOBDatasetBuilder:
 
         cfg = topology or TopologyConfig()
         topo_gen = TopologicalFeatureGenerator(cfg)
+        # If using images with auto-range, estimate ranges on the training split and freeze for val/test
+        if (
+            cfg.persistence_representation == "image"
+            and bool(getattr(cfg, "image_auto_range", False))
+            and (getattr(cfg, "image_birth_range", None) is None or getattr(cfg, "image_pers_range", None) is None)
+        ):
+            _ = topo_gen.rolling_transform(rec["timestamps"][:t0], X_train, stride=topo_stride)
+            b_rng = getattr(topo_gen, "_active_birth_range", None)
+            p_rng = getattr(topo_gen, "_active_pers_range", None)
+            if b_rng is not None and p_rng is not None:
+                base = asdict(cfg)
+                base.update({
+                    "image_auto_range": False,
+                    "image_birth_range": b_rng,
+                    "image_pers_range": p_rng,
+                })
+                cfg = TopologyConfig(**base)
+                topo_gen = TopologicalFeatureGenerator(cfg)
 
         def build_split(s: slice) -> Dict:
             ts_split = rec["timestamps"][s]
@@ -300,11 +318,18 @@ class LOBDatasetBuilder:
                 "instrument": instrument,
                 "levels": int(self.config.levels),
                 "feature_names": rec["feature_names"].tolist(),
-                "topology": (
-                    asdict(topology) if topology is not None else asdict(TopologyConfig())
-                ),
+                "topology": (asdict(cfg) if cfg is not None else asdict(TopologyConfig())),
                 "label_key": label_key,
             }
+            if (
+                cfg.persistence_representation == "image"
+                and getattr(cfg, "image_birth_range", None) is not None
+                and getattr(cfg, "image_pers_range", None) is not None
+            ):
+                schema["topology_ranges"] = {
+                    "birth": [float(cfg.image_birth_range[0]), float(cfg.image_birth_range[1])],
+                    "persistence": [float(cfg.image_pers_range[0]), float(cfg.image_pers_range[1])],
+                }
             import json
 
             with open(ad / "feature_schema.json", "w") as f:

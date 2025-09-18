@@ -25,6 +25,7 @@ class LOBSTERParseConfig:
     time_zone: str = "UTC"
     symbol: Optional[str] = None
     venue: Optional[str] = "LOBSTER"
+    side_aware: bool = False
 
 
 def _map_lobster_type(t: pd.Series) -> pd.Series:
@@ -68,7 +69,18 @@ def parse_lobster_pair(
 
     ts = pd.to_datetime((mdf["time"].astype(float) * 1e9).astype("int64"), unit="ns", utc=True)
     side = mdf["direction"].map({1: "B", -1: "S"}).astype(object)
-    evt = _map_lobster_type(mdf["lob_type"]).astype(object)
+    base_evt = _map_lobster_type(mdf["lob_type"]).astype(object)
+    if bool(cfg.side_aware):
+        # Apply sign to MO/CX when side is known; LO uses + for bid, - for ask
+        evt = base_evt.copy()
+        mask_mo = base_evt.str.startswith("MO") & side.notna()
+        evt = evt.where(~mask_mo, "MO" + side.map({"B": "+", "S": "-"}))
+        mask_cx = base_evt.str.startswith("CX") & side.notna()
+        evt = evt.where(~mask_cx, "CX" + side.map({"B": "+", "S": "-"}))
+        mask_lo = base_evt.str.startswith("LO") & side.notna()
+        evt = evt.where(~mask_lo, "LO" + side.map({"B": "+", "S": "-"}))
+    else:
+        evt = base_evt
     size = pd.to_numeric(mdf["size"], errors="coerce").astype(float).clip(lower=0.0)
     price = pd.to_numeric(mdf["price"], errors="coerce").astype(float)
     if cfg.tick_size and cfg.tick_size > 0:
@@ -81,13 +93,36 @@ def parse_lobster_pair(
         cols.extend([f"bid_price_{l}", f"bid_size_{l}"])
     bdf.columns = cols
 
+    # Infer level by matching event price to nearest level on the same row
+    level = np.full(len(mdf), np.nan, dtype=float)
+    try:
+        L = int(L)
+        ask_price_mat = np.stack([pd.to_numeric(bdf[f"ask_price_{l}"], errors="coerce").to_numpy() for l in range(1, L + 1)], axis=1)
+        bid_price_mat = np.stack([pd.to_numeric(bdf[f"bid_price_{l}"], errors="coerce").to_numpy() for l in range(1, L + 1)], axis=1)
+        pr = price.to_numpy()
+        side_arr = side.to_numpy()
+        # Match exact equality after tick rounding; fallback: nearest match within 0.5*tick
+        for i in range(len(mdf)):
+            s = side_arr[i]
+            pi = pr[i]
+            if not np.isfinite(pi):
+                continue
+            if s == "S":  # ask side
+                idx = np.where(np.isclose(ask_price_mat[i], pi, rtol=0.0, atol=(cfg.tick_size or 0.0) * 0.5))[0]
+            else:  # B or unknown -> bid side
+                idx = np.where(np.isclose(bid_price_mat[i], pi, rtol=0.0, atol=(cfg.tick_size or 0.0) * 0.5))[0]
+            if idx.size > 0:
+                level[i] = float(int(idx[0] + 1))
+    except Exception:
+        pass
+
     out = pd.DataFrame(
         {
             "timestamp": ts,
             "event_type": evt,
             "price": price,
             "size": size,
-            "level": np.nan,
+            "level": level,
             "side": side,
             "symbol": cfg.symbol,
             "venue": cfg.venue,

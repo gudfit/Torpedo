@@ -142,8 +142,13 @@ def main():
             _topo_global = None
 
     def _topo_for_inst(inst: str) -> TopologyConfig:
+        import os as _os
+        env_strict = _os.environ.get("PAPER_TORPEDO_STRICT_TDA", "0").lower() in {"1", "true"}
         if _topo_global is not None:
-            return _topo_global
+            topo = _topo_global
+            if env_strict:
+                topo.strict_tda = True  # type: ignore[attr-defined]
+            return topo
         if args.use_topo_selected:
             cand = args.artifact_root / inst / "topology_selected.json"
             if not cand.exists():
@@ -151,10 +156,14 @@ def main():
                 cand = alt if alt.exists() else cand
             if cand.exists():
                 try:
-                    return TopologyConfig(**_json_topo.loads(cand.read_text()))
+                    topo = TopologyConfig(**_json_topo.loads(cand.read_text()))
+                    if env_strict:
+                        topo.strict_tda = True  # type: ignore[attr-defined]
+                    return topo
                 except Exception:
                     pass
-        return TopologyConfig(strict_tda=bool(args.strict_tda))
+        strict = bool(args.strict_tda) or env_strict
+        return TopologyConfig(strict_tda=strict)
 
     if args.print_types_info:
 
@@ -223,6 +232,9 @@ def main():
             return (mx + 1) if found else 6
 
         num_event_types = _infer_num_event_types(train, val, test)
+        # Respect paper strict TDA default via env if not explicitly set on CLI
+        import os as _os
+        env_strict = _os.environ.get("PAPER_TORPEDO_STRICT_TDA", "0").lower() in {"1", "true"}
         cfg = ModelConfig(
             hidden_size=args.hidden,
             num_layers=args.layers,
