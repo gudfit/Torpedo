@@ -1,5 +1,6 @@
-use ndarray::{Array2, Axis};
-use numpy::{PyReadonlyArray2, ToPyArray};
+#![deny(warnings)]
+use ndarray::Array2;
+use numpy::PyReadonlyArray2;
 use pyo3::prelude::*;
 use numpy::PyReadonlyArray1;
 

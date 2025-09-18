@@ -16,7 +16,7 @@ paper-smoke:
 
 # Build optional Rust extensions (requires toolchain and network to fetch crates)
 build-rust:
-	UV_CACHE_DIR=.tmp/uv uv run -q python scripts/build_native.py rust --verbose
+	RUSTFLAGS="-D warnings" UV_CACHE_DIR=.tmp/uv uv run -q python scripts/build_native.py rust --verbose
 
 # CI helper: run paper smoke, add fake returns, and regime metrics on generated predictions
 ci-regime-smoke: paper-smoke
