@@ -20,7 +20,6 @@ artifacts/
 .venv/
 .uv/
 *.parquet
-data/
 logs/
 *.log
 *.ndjson
