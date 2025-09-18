@@ -40,8 +40,8 @@ class TrainingPipeline:
     ) -> Dict[str, float]:
         """Run the full training loop with early stopping."""
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model.to(device)
+        # Respect the model's current device; don't force to CUDA automatically.
+        device = next(self.model.parameters()).device if any(p.requires_grad for p in self.model.parameters()) else torch.device("cpu")
         optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.config.training.learning_rate,
@@ -53,7 +53,7 @@ class TrainingPipeline:
             self.model.train()
             last_loss = None
             for batch in train_loader:
-                batch = {k: v.to(device) if hasattr(v, "to") else v for k, v in batch.items()}
+                batch = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in batch.items()}
                 if self.config.training.bptt_steps and batch["features"].ndim == 3:
                     T = batch["features"].shape[1]
                     step = int(self.config.training.bptt_steps)
@@ -134,7 +134,7 @@ class TrainingPipeline:
         logits_all = []
         labels_all = []
         for batch in data_loader:
-            batch = {k: v.to(device) if hasattr(v, "to") else v for k, v in batch.items()}
+            batch = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in batch.items()}
             outputs = self.model(batch["features"], batch["topology"], batch.get("mask"))
             loss_outputs = self.loss(outputs, batch, list(self.model.parameters()))
             total_loss += float(loss_outputs.total.detach().cpu())
