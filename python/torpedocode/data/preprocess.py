@@ -39,7 +39,39 @@ class HarmoniseConfig:
 
 
 def _to_utc(ts: pd.Series, tz: str) -> pd.Series:
-    t = pd.to_datetime(ts, utc=True, errors="coerce")
+    """Robust UTC conversion for mixed timestamp types.
+
+    Accepts ISO8601 strings or numeric epoch times. For numeric inputs, auto-detects
+    likely unit by magnitude (ns/us/ms/s) and converts to UTC.
+    """
+    ser = pd.Series(ts)
+    # Fast path for already-datetime-like
+    t = pd.to_datetime(ser, utc=True, errors="coerce")
+    # If a good portion converted, use it
+    if t.notna().mean() > 0.5:
+        return t
+    # Try numeric epoch with unit inference
+    v = pd.to_numeric(ser, errors="coerce")
+    vals = v[~v.isna()].astype(float).to_numpy()
+    if vals.size == 0:
+        return t  # keep whatever we could parse
+    med = float(np.nanmedian(np.abs(vals)))
+    # Heuristic thresholds (epoch around 1.7e9 s, 1.7e12 ms, 1.7e15 us, 1.7e18 ns)
+    if med > 1e17:
+        unit = "ns"
+    elif med > 1e14:
+        unit = "us"
+    elif med > 1e11:
+        unit = "ms"
+    elif med > 1e8:
+        unit = "s"
+    else:
+        unit = None
+    if unit is not None:
+        try:
+            return pd.to_datetime(v, unit=unit, utc=True, errors="coerce")
+        except Exception:
+            pass
     return t
 
 
