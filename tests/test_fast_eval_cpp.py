@@ -19,7 +19,18 @@ def _build_fast_eval(tmp_path: Path) -> Path | None:
     if shutil.which("g++") is None:
         return None
     out = tmp_path / "fast_eval"
-    code = subprocess.call(["g++", "-O3", "-std=c++17", "-o", str(out), str(src)])
+    # Use aggressive but portable optimizations to better reflect real-world builds
+    # (aligns with the OpenMP build sans -fopenmp)
+    code = subprocess.call([
+        "g++",
+        "-O3",
+        "-march=native",
+        "-ffast-math",
+        "-std=c++17",
+        "-o",
+        str(out),
+        str(src),
+    ])
     if code != 0 or not out.exists():
         return None
     return out
