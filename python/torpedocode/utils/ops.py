@@ -17,11 +17,12 @@ def _try_build_and_load() -> bool:
 
         root = pathlib.Path(__file__).resolve().parents[3]
         src_cpp = root / "cpp" / "src" / "extension.cpp"
+        src_tpp = root / "cpp" / "src" / "tpp_loss.cpp"
         if verbose:
             print("[torpedocode] JIT-building CPU-only Torch op (TORPEDOCODE_AUTO_BUILD_OPS=1)")
         _ = _load(
             name="torpedocode_kernels",
-            sources=[str(src_cpp)],
+            sources=[str(src_cpp), str(src_tpp)],
             extra_cflags=["-O3"],
             include_dirs=[str(root / "cpp" / "include")],
             verbose=False,

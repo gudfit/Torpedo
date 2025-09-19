@@ -92,6 +92,30 @@ TORCH_LIBRARY(torpedocode, m) {
           // Return in original dtype on original device
           return y.to(features.dtype());
         });
+  m.def("tpp_loss(Tensor intensities, Tensor mark_mu, Tensor mark_log_sigma, "
+        "Tensor event_types, Tensor delta_t, Tensor? sizes=None, Tensor? "
+        "mask=None, int smoothness_mode=1) -> (Tensor, Tensor)",
+        [](torch::Tensor intensities, torch::Tensor mark_mu,
+           torch::Tensor mark_log_sigma, torch::Tensor event_types,
+           torch::Tensor delta_t, c10::optional<torch::Tensor> sizes,
+           c10::optional<torch::Tensor> mask, int64_t smoothness_mode) {
+          auto mode = static_cast<int64_t>(smoothness_mode);
+          if (mode < 0 || mode > 2) {
+            TORCH_WARN("Unknown smoothness_mode=", mode,
+                       "; defaulting to global (1)");
+            mode = 1;
+          }
+          torpedocode::TPPLossInputs in{intensities,
+                                        mark_mu,
+                                        mark_log_sigma,
+                                        event_types,
+                                        delta_t,
+                                        sizes.has_value() ? *sizes : torch::Tensor(),
+                                        mask.has_value() ? *mask : torch::Tensor(),
+                                        static_cast<torpedocode::SmoothnessNorm>(mode)};
+          auto out = torpedocode::tpp_loss(in);
+          return std::make_tuple(out.nll_mean, out.smoothness);
+        });
 }
 
 // Define a minimal Python module so torch.utils.cpp_extension.load can import

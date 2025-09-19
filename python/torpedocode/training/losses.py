@@ -7,6 +7,45 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
+from ..utils.ops import has_torpedocode_op
+
+
+def _maybe_native_tpp_loss(
+    intensities: torch.Tensor,
+    mark_mu: torch.Tensor,
+    mark_log_sigma: torch.Tensor,
+    event_types: torch.Tensor,
+    delta_t: torch.Tensor,
+    sizes: torch.Tensor | None,
+    mask: torch.Tensor | None,
+    smoothness_norm: str,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    try:
+        if not has_torpedocode_op():
+            return None
+    except Exception:
+        return None
+
+    mode_map = {"none": 0, "global": 1, "per_seq": 2}
+    mode = mode_map.get(str(smoothness_norm).lower(), 1)
+    try:
+        out = torch.ops.torpedocode.tpp_loss(
+            intensities,
+            mark_mu,
+            mark_log_sigma,
+            event_types,
+            delta_t,
+            sizes if sizes is not None else None,
+            mask if mask is not None else None,
+            mode,
+        )
+    except (AttributeError, RuntimeError, TypeError):
+        return None
+
+    if isinstance(out, (tuple, list)) and len(out) >= 2:
+        return out[0], out[1]
+    return None
+
 
 @dataclass
 class LossOutputs:
@@ -85,65 +124,86 @@ class HybridLossComputer:
             and outputs.intensities
             and outputs.mark_params
         ):
-            etypes = batch["event_type_ids"].long()
-            dt = batch["delta_t"].float()
-            mask = (etypes >= 0).float()
-            heads = [outputs.intensities[f"event_{i}"] for i in range(len(outputs.intensities))]
+            heads = [
+                outputs.intensities[f"event_{i}"] for i in range(len(outputs.intensities))
+            ]
             lamb = torch.cat(heads, dim=-1).clamp_min(1e-12)
-            gather_idx = etypes.clamp_min(0).unsqueeze(-1)
-            lamb_evt = torch.gather(lamb, dim=-1, index=gather_idx).squeeze(-1)
-            log_lamb_evt = torch.log(lamb_evt) * mask
-            comp = (lamb.sum(dim=-1) * dt).sum(dim=1)
-            mark_nll = torch.zeros_like(comp)
-            if "sizes" in batch:
-                sizes = batch["sizes"].float().clamp_min(1e-12)
-                mus, log_sigs = zip(
-                    *[outputs.mark_params[f"event_{i}"] for i in range(len(outputs.mark_params))]
-                )
-                mu = torch.cat(mus, dim=-1)
-                log_sig = torch.cat(log_sigs, dim=-1)
-                mu_evt = torch.gather(mu, dim=-1, index=gather_idx).squeeze(-1)
-                log_sig_evt = torch.gather(log_sig, dim=-1, index=gather_idx).squeeze(-1)
-                z = (torch.log(sizes) - mu_evt) / (torch.exp(log_sig_evt) + 1e-12)
-                mark_nll = (
-                    (
-                        0.5 * z.pow(2)
-                        + log_sig_evt
-                        + torch.log(sizes)
-                        + 0.5 * torch.log(torch.tensor(2 * 3.1415926535, device=device))
-                    )
-                    * mask
-                ).sum(dim=1)
-
-            nll = -(log_lamb_evt.sum(dim=1)) + comp + mark_nll
-            tpp_mark_loss = nll.mean()
-            # Exact jump at event i equals lambda(t_i^+) - lambda(t_i^-).
-            # With piecewise-constant intensities between events, lambda(t_i^-) = lambda(t_{i-1}^+),
-            # so torch.diff along time yields the exact jump sequence.
-            dl = torch.diff(lamb, dim=1)
+            device = lamb.device
+            dtype = lamb.dtype
+            etypes = batch["event_type_ids"].to(device=device, dtype=torch.long)
+            dt = batch["delta_t"].to(device=device, dtype=dtype)
+            event_mask = (etypes >= 0).to(dtype=dtype)
+            mus, log_sigs = zip(
+                *[outputs.mark_params[f"event_{i}"] for i in range(len(outputs.mark_params))]
+            )
+            mark_mu = torch.cat(mus, dim=-1).to(device=device, dtype=dtype)
+            mark_log_sig = torch.cat(log_sigs, dim=-1).to(device=device, dtype=dtype)
+            sizes_tensor = None
+            if "sizes" in batch and batch["sizes"] is not None:
+                sizes_tensor = batch["sizes"].to(device=device, dtype=dtype)
+            mask_tensor = None
             if isinstance(batch, dict) and "mask" in batch and batch["mask"] is not None:
-                m = batch["mask"].float()
-                pair_mask = (m[:, 1:] * m[:, :-1]).unsqueeze(-1)
-                if self.smoothness_norm == "none":
-                    smoothness = (dl.pow(2) * pair_mask).sum()
-                elif self.smoothness_norm == "per_seq":
-                    # average per sequence by its valid pair count, then mean over batch
-                    per_seq = (dl.pow(2) * pair_mask).sum(dim=(1, 2))
-                    pairs = pair_mask.sum(dim=(1, 2)).clamp_min(1.0)
-                    smoothness = (per_seq / pairs).mean()
-                else:  # global
-                    denom = pair_mask.sum().clamp_min(1.0)
-                    smoothness = (dl.pow(2) * pair_mask).sum() / denom
+                mask_tensor = batch["mask"].to(device=device, dtype=dtype)
+
+            native = _maybe_native_tpp_loss(
+                lamb,
+                mark_mu,
+                mark_log_sig,
+                etypes,
+                dt,
+                sizes_tensor,
+                mask_tensor,
+                self.smoothness_norm,
+            )
+            if native is not None:
+                tpp_mark_loss, smoothness = native
             else:
-                if self.smoothness_norm == "none":
-                    smoothness = dl.pow(2).sum()
-                elif self.smoothness_norm == "per_seq":
-                    # divide by (T-1)*M per sequence, then mean
-                    per_seq = dl.pow(2).sum(dim=(1, 2))
-                    pairs = torch.tensor(dl.shape[1] * dl.shape[2], device=dl.device, dtype=dl.dtype).clamp_min(1.0)
-                    smoothness = (per_seq / pairs).mean()
-                else:  # global (sum over dims then mean over batch)
-                    smoothness = (dl.pow(2).sum(dim=(-1, -2))).mean()
+                gather_idx = etypes.clamp_min(0).unsqueeze(-1)
+                lamb_evt = torch.gather(lamb, dim=-1, index=gather_idx).squeeze(-1)
+                log_lamb_evt = torch.log(lamb_evt) * event_mask
+                comp = (lamb.sum(dim=-1) * dt).sum(dim=1)
+                mark_nll = torch.zeros_like(comp)
+                if sizes_tensor is not None:
+                    log_sizes = torch.log(sizes_tensor.clamp_min(1e-12))
+                    mu_evt = torch.gather(mark_mu, dim=-1, index=gather_idx).squeeze(-1)
+                    log_sig_evt = torch.gather(mark_log_sig, dim=-1, index=gather_idx).squeeze(-1)
+                    z = (log_sizes - mu_evt) / (torch.exp(log_sig_evt) + 1e-12)
+                    const = 0.5 * torch.log(
+                        torch.tensor(2 * 3.1415926535, device=device, dtype=dtype)
+                    )
+                    mark_nll = (
+                        (0.5 * z.pow(2) + log_sig_evt + log_sizes + const) * event_mask
+                    ).sum(dim=1)
+
+                nll = -(log_lamb_evt.sum(dim=1)) + comp + mark_nll
+                tpp_mark_loss = nll.mean()
+                dl = torch.diff(lamb, dim=1)
+                if mask_tensor is not None:
+                    pair_mask = (mask_tensor[:, 1:] * mask_tensor[:, :-1]).unsqueeze(-1)
+                    if self.smoothness_norm == "none":
+                        smoothness = (dl.pow(2) * pair_mask).sum()
+                    elif self.smoothness_norm == "per_seq":
+                        per_seq = (dl.pow(2) * pair_mask).sum(dim=(1, 2))
+                        pairs = pair_mask.sum(dim=(1, 2)).clamp_min(1.0)
+                        smoothness = (per_seq / pairs).mean()
+                    else:
+                        denom = pair_mask.sum().clamp_min(1.0)
+                        smoothness = (dl.pow(2) * pair_mask).sum() / denom
+                else:
+                    if self.smoothness_norm == "none":
+                        smoothness = dl.pow(2).sum()
+                    elif self.smoothness_norm == "per_seq":
+                        per_seq = dl.pow(2).sum(dim=(1, 2))
+                        pairs = (
+                            torch.tensor(
+                                dl.shape[1] * dl.shape[2],
+                                device=dl.device,
+                                dtype=dl.dtype,
+                            ).clamp_min(1.0)
+                        )
+                        smoothness = (per_seq / pairs).mean()
+                    else:
+                        smoothness = (dl.pow(2).sum(dim=(-1, -2))).mean()
 
         if self.gamma and self.gamma > 0:
             sqsum = torch.zeros((), device=device)
