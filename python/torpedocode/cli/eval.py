@@ -20,8 +20,10 @@ import numpy as np
 
 from ..evaluation.metrics import (
     compute_classification_metrics,
+    compute_calibration_report,
     delong_ci_auroc,
     delong_test_auroc,
+    block_bootstrap_micro_ci,
 )
 from ..evaluation.io import load_preds_labels_csv, load_preds_labels_npz
 from ..evaluation.helpers import temperature_scale_from_probs
@@ -44,6 +46,19 @@ def main():
         action="store_true",
         help="Apply temperature scaling to logits derived from probabilities before metrics",
     )
+    ap.add_argument("--ece-bins", type=int, default=15, help="Number of bins for ECE calculation")
+    ap.add_argument(
+        "--block-bootstrap",
+        action="store_true",
+        help="Report stationary block bootstrap CIs for AUROC/AUPRC/Brier/ECE",
+    )
+    ap.add_argument("--block-length", type=float, default=50.0, help="Expected block length")
+    ap.add_argument("--n-boot", type=int, default=200, help="Bootstrap replicates")
+    ap.add_argument(
+        "--auto-block",
+        action="store_true",
+        help="Estimate expected block length via Politis–White rule",
+    )
     ap.add_argument("--output", type=Path, default=None, help="Optional JSON output path")
 
     args = ap.parse_args()
@@ -57,14 +72,33 @@ def main():
             args.npz, pred_key=args.pred_key, label_key=args.label_key, pred2_key=args.pred2_key
         )
 
+    # Base metrics
     m = compute_classification_metrics(p, y)
     auc, lo, hi = delong_ci_auroc(p, y, alpha=args.alpha)
+    # Override ECE with requested bin count (if different)
+    if int(args.ece_bins) != 15:
+        from math import isfinite as _isfinite
+
+        num_bins = int(max(1, args.ece_bins))
+        cal = compute_calibration_report(p, y, num_bins=num_bins)
+        n = len(p)
+        base = n // num_bins
+        rem = n % num_bins
+        bin_sizes = np.full(num_bins, base, dtype=float)
+        if rem > 0:
+            bin_sizes[:rem] += 1.0
+        weights = bin_sizes / float(max(n, 1))
+        ece_bins = float(np.sum(np.abs(cal.bin_accuracy - cal.bin_confidence) * weights))
+        ece_val = ece_bins
+    else:
+        ece_val = m.ece
+
     out = {
         "auroc": auc,
         "auroc_ci": [lo, hi],
         "auprc": m.auprc,
         "brier": m.brier,
-        "ece": m.ece,
+        "ece": ece_val,
     }
 
     if args.temperature_scale:
@@ -81,6 +115,17 @@ def main():
                 },
             }
         )
+
+    if args.block_bootstrap:
+        L = None if bool(args.auto_block) else float(args.block_length)
+        ci = block_bootstrap_micro_ci(
+            p,
+            y,
+            expected_block_length=L,
+            n_boot=int(args.n_boot),
+            alpha=float(args.alpha),
+        )
+        out["block_bootstrap_ci"] = ci
 
     if p2 is not None:
         delta, z, pval = delong_test_auroc(p, p2, y)

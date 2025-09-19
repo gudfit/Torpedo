@@ -171,6 +171,17 @@ def main():
         help="Estimate expected block length via Politis–White rule",
     )
     ap.add_argument("--n-boot", type=int, default=200, help="Number of bootstrap samples")
+    ap.add_argument(
+        "--collect-ks-per-type",
+        action="store_true",
+        help="Collect per-type KS p-values from tpp_test_diagnostics.json across artifacts",
+    )
+    ap.add_argument(
+        "--ks-pattern",
+        type=str,
+        default="*/tpp_test_diagnostics.json",
+        help="Glob under chosen root for TPP diagnostics JSONs",
+    )
 
     args = ap.parse_args()
 
@@ -233,6 +244,28 @@ def main():
                 )
                 ci = block_bootstrap_micro_ci(P, Y, expected_block_length=L, n_boot=args.n_boot)
                 res["micro_ci_block"] = ci
+
+    # Optional: collect per-type KS p-values (time-rescaling) from diagnostics
+    if args.collect_ks_per_type:
+        base = args.root if args.root is not None else args.pred_root
+        try:
+            files_ks = [Path(p) for p in glob.glob(str(base / args.ks_pattern))]
+        except Exception:
+            files_ks = []
+        table = {}
+        for f in files_ks:
+            try:
+                obj = json.loads(f.read_text())
+                per = obj.get("ks_p_value_per_type")
+                if isinstance(per, dict):
+                    try:
+                        key = str(f.parent.relative_to(base))
+                    except Exception:
+                        key = f.parent.name
+                    table[key] = {str(k): float(v) for k, v in per.items()}
+            except Exception:
+                continue
+        res["ks_per_type"] = table
 
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
