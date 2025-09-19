@@ -1,5 +1,10 @@
+import math
+
 import numpy as np
+import pytest
 import torch
+
+from torpedocode.utils.ops import has_torpedocode_op
 
 
 def test_tpp_nll_exact_compensator():
@@ -57,3 +62,110 @@ def test_smoothness_penalty_matches_diff_of_intensities():
     expected_smooth = float(1 + 0 + 1 + 0 + 4 + 4)
 
     assert np.isclose(float(lo.smoothness.detach().cpu()), expected_smooth, rtol=1e-6, atol=1e-8)
+
+
+def _manual_tpp_loss(
+    intensities: torch.Tensor,
+    mark_mu: torch.Tensor,
+    mark_log_sigma: torch.Tensor,
+    event_types: torch.Tensor,
+    delta_t: torch.Tensor,
+    sizes: torch.Tensor | None,
+    mask: torch.Tensor | None,
+    smoothness_mode: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    dtype = intensities.dtype
+    device = intensities.device
+    lam = intensities.clamp_min(1e-12)
+    gather_idx = event_types.clamp_min(0).unsqueeze(-1)
+    event_mask = (event_types >= 0).to(dtype=dtype)
+    lam_evt = torch.gather(lam, dim=-1, index=gather_idx).squeeze(-1)
+    log_lam_evt = torch.log(lam_evt) * event_mask
+    comp = (lam.sum(dim=-1) * delta_t).sum(dim=1)
+    if sizes is not None:
+        log_sizes = torch.log(sizes.clamp_min(1e-12))
+        mu_evt = torch.gather(mark_mu, dim=-1, index=gather_idx).squeeze(-1)
+        log_sig_evt = torch.gather(mark_log_sigma, dim=-1, index=gather_idx).squeeze(-1)
+        z = (log_sizes - mu_evt) / (torch.exp(log_sig_evt) + 1e-12)
+        const = 0.5 * torch.log(torch.tensor(2 * math.pi, device=device, dtype=dtype))
+        mark = ((0.5 * z.pow(2) + log_sig_evt + log_sizes + const) * event_mask).sum(dim=1)
+    else:
+        mark = torch.zeros_like(comp)
+    nll = -(log_lam_evt.sum(dim=1)) + comp + mark
+    nll_mean = nll.mean()
+
+    dl = lam[:, 1:] - lam[:, :-1]
+    if mask is not None:
+        pair_mask = (mask[:, 1:] * mask[:, :-1]).unsqueeze(-1)
+        diff_sq = dl.pow(2) * pair_mask
+        if smoothness_mode == "none":
+            smooth = diff_sq.sum()
+        elif smoothness_mode == "per_seq":
+            per_seq = diff_sq.sum(dim=(1, 2))
+            denom = pair_mask.sum(dim=(1, 2)).clamp_min(1.0)
+            smooth = (per_seq / denom).mean()
+        else:
+            denom = pair_mask.sum().clamp_min(1.0)
+            smooth = diff_sq.sum() / denom
+    else:
+        diff_sq = dl.pow(2)
+        if smoothness_mode == "none":
+            smooth = diff_sq.sum()
+        elif smoothness_mode == "per_seq":
+            per_seq = diff_sq.sum(dim=(1, 2))
+            denom = torch.tensor(
+                diff_sq.shape[1] * diff_sq.shape[2], device=device, dtype=dtype
+            ).clamp_min(1.0)
+            smooth = (per_seq / denom).mean()
+        else:
+            smooth = diff_sq.sum(dim=(-1, -2)).mean()
+    return nll_mean, smooth
+
+
+@pytest.mark.parametrize("smoothness_mode,mode_idx", [("none", 0), ("global", 1), ("per_seq", 2)])
+@pytest.mark.parametrize("use_sizes", [True, False])
+@pytest.mark.parametrize("use_mask", [True, False])
+def test_native_tpp_loss_matches_python(monkeypatch, smoothness_mode, mode_idx, use_sizes, use_mask):
+    monkeypatch.setenv("TORPEDOCODE_AUTO_BUILD_OPS", "1")
+    if not has_torpedocode_op():
+        pytest.skip("native op not available")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dtype = torch.float32
+    B, T, M = 2, 5, 3
+    intensities = torch.rand(B, T, M, device=device, dtype=dtype) + 0.05
+    mark_mu = torch.randn(B, T, M, device=device, dtype=dtype)
+    mark_log_sigma = torch.randn(B, T, M, device=device, dtype=dtype) * 0.2
+    event_types = torch.randint(low=-1, high=M, size=(B, T), device=device)
+    delta_t = torch.rand(B, T, device=device, dtype=dtype)
+    sizes = torch.rand(B, T, device=device, dtype=dtype) + 0.05 if use_sizes else None
+    mask = torch.rand(B, T, device=device, dtype=dtype) if use_mask else None
+    if mask is not None:
+        mask[:, -1] = 0.0
+
+    expected_nll, expected_smooth = _manual_tpp_loss(
+        intensities,
+        mark_mu,
+        mark_log_sigma,
+        event_types,
+        delta_t,
+        sizes,
+        mask,
+        smoothness_mode,
+    )
+
+    out = torch.ops.torpedocode.tpp_loss(
+        intensities,
+        mark_mu,
+        mark_log_sigma,
+        event_types,
+        delta_t,
+        sizes,
+        mask,
+        mode_idx,
+    )
+
+    assert isinstance(out, (tuple, list))
+    got_nll, got_smooth = out
+    assert torch.allclose(got_nll, expected_nll, atol=1e-6, rtol=1e-5)
+    assert torch.allclose(got_smooth, expected_smooth, atol=1e-6, rtol=1e-5)

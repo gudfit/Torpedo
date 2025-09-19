@@ -8,6 +8,7 @@ find_package(Torch REQUIRED)
 
 add_library(torpedocode_kernels SHARED
     src/extension.cpp
+    src/tpp_loss.cpp
     src/lob_kernels.cu
 )
 
