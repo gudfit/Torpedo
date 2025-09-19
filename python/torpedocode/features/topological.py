@@ -8,8 +8,9 @@ landscapes and images as specified in :class:`TopologyConfig`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 import warnings
+import json
 from typing import Optional, Tuple, Iterable, List
 
 import numpy as np
@@ -84,6 +85,21 @@ class TopologicalFeatureGenerator:
         wlist = (
             list(window_sizes_s) if window_sizes_s is not None else list(self.config.window_sizes_s)
         )
+        if _tda_native is not None and hasattr(_tda_native, "rolling_topo"):
+            try:
+                cfg_json = json.dumps(asdict(self.config))
+                arr = np.asarray(series, dtype=np.float64, order="C")
+                out = _tda_native.rolling_topo(
+                    arr,
+                    ts_ns.astype(np.int64, copy=False),
+                    [int(w) for w in wlist],
+                    int(stride),
+                    cfg_json,
+                )
+                return np.asarray(out, dtype=np.float32)
+            except Exception:
+                if self._strict():
+                    raise
         reps_all = []
         for w in wlist:
             w_ns = int(w) * 1_000_000_000
@@ -118,7 +134,9 @@ class TopologicalFeatureGenerator:
                         continue
                 if births and pers:
                     with warnings.catch_warnings():
-                        warnings.filterwarnings("ignore", message="invalid value encountered in subtract")
+                        warnings.filterwarnings(
+                            "ignore", message="invalid value encountered in subtract"
+                        )
                         bmin, bmax = np.quantile(births, [0.01, 0.99]).astype(float)
                         pmin, pmax = np.quantile(pers, [0.01, 0.99]).astype(float)
                     self._active_birth_range = (float(bmin), float(bmax))
@@ -253,7 +271,9 @@ class TopologicalFeatureGenerator:
         """
         if _tda_native is not None:
             try:
-                return float(_tda_native.epsilon_for_lcc(np.asarray(X, dtype=float), float(threshold)))
+                return float(
+                    _tda_native.epsilon_for_lcc(np.asarray(X, dtype=float), float(threshold))
+                )
             except Exception:
                 pass
         n = int(X.shape[0])
@@ -353,7 +373,7 @@ class TopologicalFeatureGenerator:
             surf = asks
         elif field_type == "net":
             surf = bids - asks
-        else:  
+        else:
             surf = (bids - asks) / (np.abs(bids) + np.abs(asks) + eps)
         return np.asarray(surf, dtype=np.float32)
 
@@ -494,12 +514,16 @@ class TopologicalFeatureGenerator:
                     img[y, x] += 1.0
             return img.flatten()
 
-        b_range = getattr(self, "_active_birth_range", None) or getattr(
-            self.config, "image_birth_range", None
-        ) or (0.0, 1.0)
-        p_range = getattr(self, "_active_pers_range", None) or getattr(
-            self.config, "image_pers_range", None
-        ) or (0.0, 1.0)
+        b_range = (
+            getattr(self, "_active_birth_range", None)
+            or getattr(self.config, "image_birth_range", None)
+            or (0.0, 1.0)
+        )
+        p_range = (
+            getattr(self, "_active_pers_range", None)
+            or getattr(self.config, "image_pers_range", None)
+            or (0.0, 1.0)
+        )
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message="invalid value encountered in subtract")
             pim = PersistenceImager(
@@ -535,9 +559,9 @@ class TopologicalFeatureGenerator:
             imgs.append(img.astype(np.float32))
         return np.concatenate([im.flatten() for im in imgs], axis=0)
 
-
     def _strict(self) -> bool:
         import os as _os
+
         env = _os.environ.get("TORPEDOCODE_STRICT_TDA", "0").lower() in {"1", "true"}
         return bool(getattr(self.config, "strict_tda", False)) or env
 

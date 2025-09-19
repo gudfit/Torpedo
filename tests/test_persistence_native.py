@@ -3,6 +3,9 @@ import math
 import numpy as np
 import pytest
 
+from torpedocode.config import TopologyConfig
+import torpedocode.features.topological as topo
+
 
 tda = pytest.importorskip("torpedocode_tda")
 
@@ -129,3 +132,52 @@ def test_persistence_landscape_native_matches_reference():
         )
         ref = _ref_persistence_landscape(diagram, k, resolution, summary_mode)
         np.testing.assert_allclose(native, ref, rtol=1e-6, atol=1e-6)
+
+
+def _rolling_reference_and_native(
+    cfg: TopologyConfig, timestamps: np.ndarray, series: np.ndarray, monkeypatch
+) -> tuple[np.ndarray, np.ndarray]:
+    native_mod = topo._tda_native
+    if native_mod is None:
+        pytest.skip("torpedocode_tda native module unavailable")
+    monkeypatch.setattr(topo, "_tda_native", None)
+    gen_py = topo.TopologicalFeatureGenerator(cfg)
+    ref = gen_py.rolling_transform(timestamps, series)
+    monkeypatch.setattr(topo, "_tda_native", native_mod)
+    gen_native = topo.TopologicalFeatureGenerator(cfg)
+    out = gen_native.rolling_transform(timestamps, series)
+    return ref, out
+
+
+def test_rolling_transform_native_cubical_matches_python(monkeypatch):
+    pytest.importorskip("gudhi")
+    cfg = TopologyConfig(
+        window_sizes_s=[1, 2],
+        complex_type="cubical",
+        persistence_representation="landscape",
+        landscape_levels=3,
+        max_homology_dimension=1,
+    )
+    rng = np.random.default_rng(123)
+    series = rng.standard_normal((12, 20)).astype(np.float32)
+    timestamps = np.arange(series.shape[0], dtype=np.int64) * 1_000_000_000
+    ref, out = _rolling_reference_and_native(cfg, timestamps, series, monkeypatch)
+    np.testing.assert_allclose(out, ref, rtol=1e-5, atol=1e-5)
+
+
+def test_rolling_transform_native_vr_image_matches_python(monkeypatch):
+    pytest.importorskip("ripser")
+    pytest.importorskip("persim")
+    cfg = TopologyConfig(
+        window_sizes_s=[1, 2],
+        complex_type="vietoris_rips",
+        persistence_representation="image",
+        image_resolution=8,
+        image_bandwidth=0.05,
+        max_homology_dimension=1,
+    )
+    rng = np.random.default_rng(321)
+    series = rng.standard_normal((10, 6)).astype(np.float32)
+    timestamps = np.arange(series.shape[0], dtype=np.int64) * 1_000_000_000
+    ref, out = _rolling_reference_and_native(cfg, timestamps, series, monkeypatch)
+    np.testing.assert_allclose(out, ref, rtol=1e-5, atol=1e-5)
