@@ -229,6 +229,7 @@ Acceleration roadmap (CPU/GPU)
 Topology selection and walk-forward
 - Run a lightweight topology search on one market: `python -m torpedocode.cli.topo_search ...` and reuse the selected JSON across
   batch/pooled/LOMO modes via `--topology-json`. The training CLIs honor this and persist the active topology schema.
+- For landscapes, you can sweep resolutions via `--landscape-res 64 128` in `cli.topo_search` in addition to levels `K`.
 - For walk-forward validation, `train` supports `--folds K` to produce K sequential folds with cumulative train and split val/test windows. Artifacts per fold are saved under
   `<artifact-dir>/fold_i/`.
 
@@ -270,12 +271,28 @@ Manual quick commands (if you prefer)
   - `FAST_EVAL_BIN`, `PAPER_TORPEDO_STRICT_TDA=1`, and `OMP_NUM_THREADS` (defaults to CPU cores)
 - It can also generate `train_cmd.sh` exporting the same and running train with `--expand-types-by-level`.
 
+### Paper Packager
+
+- Bundle key artifacts (schemas, predictions, evals, diagnostics) into a single archive for submission:
+
+```
+uv run python scripts/paper_pack.py --artifact-root ./artifacts --output ./artifacts/paper_bundle.zip
+```
+
+- Or via Makefile:
+
+```
+make paper-pack
+```
+
+- Contents include `feature_schema.json`, `scaler_schema.json`, `topology_selected.json`, `tda_backends.json`, `predictions_*.csv`, `eval_*.json`, and TPP diagnostics.
+
 ## New helpers and flags (methodology alignment)
 
 - Shared IO + helpers
   - `torpedocode.evaluation.io`: `load_preds_labels_csv/npz` to avoid duplicate CSV/NPZ readers.
   - `torpedocode.evaluation.helpers`:
-    - `write_tda_backends_json(path)`: writes availability/version for `ripser`, `gudhi`, `persim`.
+    - `write_tda_backends_json(path)`: writes availability/version for `torpedocode_tda`, `ripser`, `gudhi`, `persim`.
     - `save_tpp_arrays_and_diagnostics(dir, intensities, event_type_ids, delta_t)`: emits `tpp_test_arrays.npz` and `tpp_test_diagnostics.json`.
     - `temperature_scale_from_probs(preds, labels)`: fits temperature on logits derived from probabilities and returns calibrated metrics.
 

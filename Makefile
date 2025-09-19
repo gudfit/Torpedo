@@ -58,3 +58,7 @@ ci-regime-smoke: paper-smoke
 .PHONY: wizard-deps
 wizard-deps:
 	UV_CACHE_DIR=.tmp/uv uv pip install tqdm
+
+.PHONY: paper-pack
+paper-pack:
+	$(PYTHON) scripts/paper_pack.py --artifact-root ./artifacts --output ./artifacts/paper_bundle.zip

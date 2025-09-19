@@ -25,6 +25,9 @@ def main():
     ap.add_argument("--label-key", type=str, required=True)
     ap.add_argument("--artifact-dir", type=Path, required=True)
     ap.add_argument("--strict-tda", action="store_true", help="Fail if TDA backends missing")
+    ap.add_argument(
+        "--landscape-res", type=int, nargs="*", default=None, help="Landscape resolutions (e.g., 64 128)"
+    )
     args = ap.parse_args()
 
     data = DataConfig(
@@ -37,6 +40,7 @@ def main():
     window_sizes = [[1], [5], [10]]
     reps = ["landscape", "image"]
     Ks = [3, 5]
+    l_res = args.landscape_res if args.landscape_res is not None else [64]
     img_res = [32, 64, 128]
     img_bw = [0.02, 0.05]
 
@@ -46,15 +50,17 @@ def main():
         for rep in reps:
             if rep == "landscape":
                 for K in Ks:
-                    topo = TopologyConfig(
-                        window_sizes_s=ws,
-                        persistence_representation="landscape",
-                        landscape_levels=K,
-                        strict_tda=(bool(args.strict_tda) or env_strict),
-                    )
-                    tr, va, _, _ = builder.build_splits(
-                        args.instrument,
-                        label_key=args.label_key,
+                    for res in l_res:
+                        topo = TopologyConfig(
+                            window_sizes_s=ws,
+                            persistence_representation="landscape",
+                            landscape_levels=K,
+                            landscape_resolution=int(res),
+                            strict_tda=(bool(args.strict_tda) or env_strict),
+                        )
+                        tr, va, _, _ = builder.build_splits(
+                            args.instrument,
+                            label_key=args.label_key,
                         topology=topo,
                         topo_stride=5,
                         artifact_dir=None,

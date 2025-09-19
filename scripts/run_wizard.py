@@ -895,6 +895,53 @@ def main():
             ]
         )
 
+    # Optional: Cross-market LOMO protocol
+    if yesno("Run cross-market LOMO protocol?", default=False):
+        panel_path = Path(
+            prompt(
+                "Panel CSV/JSON with market,symbol columns",
+                default=str(Path("./artifacts/panel_matched.csv")),
+            )
+        ).resolve()
+        if not panel_path.exists():
+            print(f"[warn] Panel not found at {panel_path}; skipping LOMO.")
+        else:
+            label_key = prompt("Label key", default="instability_s_5").strip() or "instability_s_5"
+            dev_default = "cuda" if _torch_cuda_available() else "cpu"
+            device = prompt("Device [cpu/cuda]", default=dev_default)
+            with_tda = yesno("Include TDA features (with_tda)?", default=True)
+            strict = yesno("Strict TDA (fail if backends missing)?", default=False)
+            out_path = Path(
+                prompt(
+                    "Output JSON path",
+                    default=str(Path("./artifacts/cross_market_lomo.json")),
+                )
+            ).resolve()
+            cmd = [
+                sys.executable,
+                "-m",
+                "torpedocode.cli.cross_market",
+                "--panel",
+                str(panel_path),
+                "--cache-root",
+                str(cache_root),
+                "--label-key",
+                label_key,
+                "--mode",
+                "lomo",
+                "--epochs",
+                "1",
+                "--device",
+                device,
+                "--output",
+                str(out_path),
+            ]
+            if with_tda:
+                cmd.append("--with-tda")
+            if strict:
+                cmd.append("--strict-tda")
+            run(cmd)
+
 
 if __name__ == "__main__":
     main()

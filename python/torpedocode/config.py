@@ -50,6 +50,8 @@ class TopologyConfig:
     max_homology_dimension: int = 1
     persistence_representation: Literal["landscape", "image"] = "landscape"
     landscape_levels: int = 5
+    # Resolution of the x-grid used for persistence landscapes when summarising levels
+    landscape_resolution: int = 64
     # Summary across the landscape grid per level; using 'mean' is more stable than 'max'.
     landscape_summary: Literal["mean", "max"] = "mean"
     image_resolution: int = 64

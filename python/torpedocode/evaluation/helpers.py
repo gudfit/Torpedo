@@ -41,6 +41,7 @@ def write_tda_backends_json(path: Path) -> None:
             return {"available": False, "version": None}
 
     report = {
+        "torpedocode_tda": _check_mod("torpedocode_tda"),
         "ripser": _check_mod("ripser"),
         "gudhi": _check_mod("gudhi"),
         "persim": _check_mod("persim"),
