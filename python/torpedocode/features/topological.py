@@ -8,8 +8,9 @@ landscapes and images as specified in :class:`TopologyConfig`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 import warnings
+import json
 from typing import Optional, Tuple, Iterable, List
 
 import numpy as np
@@ -84,6 +85,21 @@ class TopologicalFeatureGenerator:
         wlist = (
             list(window_sizes_s) if window_sizes_s is not None else list(self.config.window_sizes_s)
         )
+        if _tda_native is not None and hasattr(_tda_native, "rolling_topo"):
+            try:
+                cfg_json = json.dumps(asdict(self.config))
+                arr = np.asarray(series, dtype=np.float64, order="C")
+                out = _tda_native.rolling_topo(
+                    arr,
+                    ts_ns.astype(np.int64, copy=False),
+                    [int(w) for w in wlist],
+                    int(stride),
+                    cfg_json,
+                )
+                return np.asarray(out, dtype=np.float32)
+            except Exception:
+                if self._strict():
+                    raise
         reps_all = []
         for w in wlist:
             w_ns = int(w) * 1_000_000_000
@@ -366,6 +382,32 @@ class TopologicalFeatureGenerator:
             raise ValueError(f"Unsupported representation {self.config.persistence_representation}")
 
     def _landscape(self, diag: List[np.ndarray]) -> np.ndarray:
+        if _tda_native is not None and hasattr(_tda_native, "persistence_landscape"):
+            levels = int(self.config.landscape_levels)
+            summary_mode = str(getattr(self.config, "landscape_summary", "mean"))
+            resolution = int(getattr(self.config, "landscape_resolution", 64) or 64)
+            if resolution <= 0:
+                resolution = 64
+            try:
+                vecs = []
+                for D in diag[: self.config.max_homology_dimension + 1]:
+                    if not isinstance(D, np.ndarray) or D.size == 0:
+                        vecs.append(np.zeros((levels,), dtype=np.float32))
+                        continue
+                    arr = np.asarray(D, dtype=np.float64)
+                    out = _tda_native.persistence_landscape(
+                        arr,
+                        levels,
+                        resolution,
+                        summary_mode,
+                    )
+                    vecs.append(np.asarray(out, dtype=np.float32))
+                if vecs:
+                    return np.concatenate(vecs, axis=0)
+            except Exception:
+                if self._strict():
+                    raise
+
         try:
             from persim import PersLandscapeApprox
         except Exception:
@@ -406,6 +448,38 @@ class TopologicalFeatureGenerator:
         return np.concatenate(grids, axis=0)
 
     def _image(self, diag: List[np.ndarray]) -> np.ndarray:
+        if _tda_native is not None and hasattr(_tda_native, "persistence_image"):
+            res = int(self.config.image_resolution)
+            sigma = float(getattr(self.config, "image_bandwidth", 0.05))
+            birth_range = getattr(self, "_active_birth_range", None) or getattr(
+                self.config, "image_birth_range", None
+            )
+            pers_range = getattr(self, "_active_pers_range", None) or getattr(
+                self.config, "image_pers_range", None
+            )
+            try:
+                imgs = []
+                for D in diag[: self.config.max_homology_dimension + 1]:
+                    if not isinstance(D, np.ndarray) or D.size == 0:
+                        imgs.append(np.zeros((res * res,), dtype=np.float32))
+                        continue
+                    B = np.asarray(D[:, 0], dtype=np.float64)
+                    P = np.asarray(D[:, 1], dtype=np.float64)
+                    out = _tda_native.persistence_image(
+                        B,
+                        P,
+                        res,
+                        sigma,
+                        birth_range,
+                        pers_range,
+                    )
+                    imgs.append(np.asarray(out, dtype=np.float32))
+                if imgs:
+                    return np.concatenate(imgs, axis=0)
+            except Exception:
+                if self._strict():
+                    raise
+
         try:
             from persim import PersistenceImager
         except Exception:
