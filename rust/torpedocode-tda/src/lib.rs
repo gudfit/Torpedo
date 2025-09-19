@@ -361,48 +361,55 @@ fn vectorise_diagram(
 ) -> Vec<f32> {
     match cfg.persistence_representation.as_str() {
         "landscape" => {
-            let mut out: Vec<f32> =
-                Vec::with_capacity(cfg.landscape_levels() * (cfg.max_dim() + 1));
-            for d in 0..=cfg.max_dim() {
-                if d < diag.len() {
-                    let slice = &diag[d];
-                    let tmp = compute_landscape(
-                        slice,
-                        cfg.landscape_levels(),
-                        cfg.landscape_resolution(),
-                        cfg.landscape_summary(),
-                    );
-                    out.extend_from_slice(&tmp);
-                } else {
-                    out.extend(std::iter::repeat(0.0f32).take(cfg.landscape_levels()));
+            let dims = cfg.max_dim() + 1;
+            let levels = cfg.landscape_levels();
+            let resolution = cfg.landscape_resolution();
+            let summary = cfg.landscape_summary().to_string();
+            // Range implements `IndexedParallelIterator`, so `collect` preserves
+            // the deterministic order of homology dimensions.
+            let blocks: Vec<Vec<f32>> = (0..dims)
+                .into_par_iter()
+                .map(|d| match diag.get(d) {
+                    Some(slice) if !slice.is_empty() => {
+                        compute_landscape(slice, levels, resolution, summary.as_str())
+                    }
+                    _ => vec![0.0f32; levels],
+                })
+                .collect();
+            let mut out = Vec::with_capacity(levels * dims);
+            for mut block in blocks.into_iter() {
+                if block.len() < levels {
+                    block.resize(levels, 0.0f32);
                 }
+                out.extend_from_slice(&block);
             }
             out
         }
         "image" => {
+            let dims = cfg.max_dim() + 1;
             let res = cfg.image_resolution();
-            let mut out: Vec<f32> = Vec::with_capacity((cfg.max_dim() + 1) * res * res);
-            for d in 0..=cfg.max_dim() {
-                if d < diag.len() {
-                    let slice = &diag[d];
-                    let mut births: Vec<f64> = Vec::with_capacity(slice.len());
-                    let mut pers: Vec<f64> = Vec::with_capacity(slice.len());
-                    for &(b, p) in slice.iter() {
-                        births.push(b);
-                        pers.push(p);
+            let sigma = cfg.image_bandwidth();
+            let blocks: Vec<Vec<f32>> = (0..dims)
+                .into_par_iter()
+                .map(|d| match diag.get(d) {
+                    Some(slice) if !slice.is_empty() => {
+                        let mut births: Vec<f64> = Vec::with_capacity(slice.len());
+                        let mut pers: Vec<f64> = Vec::with_capacity(slice.len());
+                        for &(b, p) in slice.iter() {
+                            births.push(b);
+                            pers.push(p);
+                        }
+                        compute_image(&births, &pers, res, sigma, birth_range, pers_range)
                     }
-                    let img = compute_image(
-                        &births,
-                        &pers,
-                        res,
-                        cfg.image_bandwidth(),
-                        birth_range,
-                        pers_range,
-                    );
-                    out.extend_from_slice(&img);
-                } else {
-                    out.extend(std::iter::repeat(0.0f32).take(res * res));
+                    _ => vec![0.0f32; res * res],
+                })
+                .collect();
+            let mut out = Vec::with_capacity(dims * res * res);
+            for mut block in blocks.into_iter() {
+                if block.len() < res * res {
+                    block.resize(res * res, 0.0f32);
                 }
+                out.extend_from_slice(&block);
             }
             out
         }
