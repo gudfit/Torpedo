@@ -1,8 +1,8 @@
 #![deny(warnings)]
-use ndarray::Array2;
-use numpy::PyReadonlyArray2;
+use ndarray::{Array2, Axis};
+use ndarray::parallel::prelude::*;
+use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
-use numpy::PyReadonlyArray1;
 
 fn l2_distance_matrix(x: &Array2<f64>) -> Array2<f64> {
     let n = x.nrows();
@@ -114,6 +114,221 @@ fn lcc_fraction(d: &Array2<f64>, eps: f64) -> f64 {
     best as f64 / (n as f64)
 }
 
+fn compute_image(
+    births: &[f64],
+    pers: &[f64],
+    resolution: usize,
+    sigma: f64,
+    birth_range: Option<(f64, f64)>,
+    pers_range: Option<(f64, f64)>,
+) -> Vec<f32> {
+    let n = births.len().min(pers.len());
+    let mut points: Vec<(f64, f64, f64)> = Vec::with_capacity(n);
+    for i in 0..n {
+        let b = births[i];
+        let p = pers[i];
+        if b.is_finite() && p.is_finite() {
+            points.push((b, p, p.max(0.0)));
+        }
+    }
+    let res = resolution.max(1);
+    if points.is_empty() {
+        return vec![0.0f32; res * res];
+    }
+
+    let (b_lo, mut b_hi) = birth_range.unwrap_or_else(|| {
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for &(b, _, _) in points.iter() {
+            lo = lo.min(b);
+            hi = hi.max(b);
+        }
+        if !lo.is_finite() || !hi.is_finite() {
+            (0.0, 1.0)
+        } else {
+            (lo, hi)
+        }
+    });
+    let (p_lo, mut p_hi) = pers_range.unwrap_or_else(|| {
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for &(_, p, _) in points.iter() {
+            lo = lo.min(p);
+            hi = hi.max(p);
+        }
+        if !lo.is_finite() || !hi.is_finite() {
+            (0.0, 1.0)
+        } else {
+            (lo, hi)
+        }
+    });
+    if b_hi <= b_lo {
+        b_hi = b_lo + 1.0;
+    }
+    if p_hi <= p_lo {
+        p_hi = p_lo + 1.0;
+    }
+
+    let mut grid = Array2::<f64>::zeros((res, res));
+    let sigma = sigma.abs().max(1e-9);
+    let inv_sigma_sq = 1.0 / (2.0 * sigma * sigma);
+    let dx = if res > 1 {
+        (b_hi - b_lo) / ((res - 1) as f64)
+    } else {
+        1.0
+    };
+    let dy = if res > 1 {
+        (p_hi - p_lo) / ((res - 1) as f64)
+    } else {
+        1.0
+    };
+
+    grid
+        .axis_iter_mut(Axis(0))
+        .into_par_iter()
+        .enumerate()
+        .for_each(|(iy, mut row)| {
+            let py = p_lo + (iy as f64) * dy;
+            for (ix, val) in row.iter_mut().enumerate() {
+                let px = b_lo + (ix as f64) * dx;
+                let mut acc = 0.0f64;
+                for &(b, p, w) in points.iter() {
+                    let db = px - b;
+                    let dp = py - p;
+                    let dist2 = db * db + dp * dp;
+                    acc += (-dist2 * inv_sigma_sq).exp() * w;
+                }
+                *val = acc;
+            }
+        });
+
+    grid.iter().map(|v| *v as f32).collect()
+}
+
+fn compute_landscape(
+    diagram: &[(f64, f64)],
+    k: usize,
+    resolution: usize,
+    summary_mode: &str,
+) -> Vec<f32> {
+    let levels = k.max(1);
+    if diagram.is_empty() {
+        return vec![0.0f32; levels];
+    }
+    let mut pts: Vec<(f64, f64)> = Vec::with_capacity(diagram.len());
+    for &(b, p) in diagram.iter() {
+        let death = b + p;
+        if b.is_finite() && death.is_finite() && death > b {
+            pts.push((b, death));
+        }
+    }
+    if pts.is_empty() {
+        return vec![0.0f32; levels];
+    }
+    let mut x_min = f64::INFINITY;
+    let mut x_max = f64::NEG_INFINITY;
+    for &(b, d) in pts.iter() {
+        x_min = x_min.min(b);
+        x_max = x_max.max(d);
+    }
+    if !x_min.is_finite() || !x_max.is_finite() {
+        x_min = 0.0;
+        x_max = 1.0;
+    }
+    if x_max <= x_min {
+        x_max = x_min + 1.0;
+    }
+    let res = resolution.max(2);
+    let mut xs = Vec::with_capacity(res);
+    for i in 0..res {
+        let x = if res == 1 {
+            (x_min + x_max) * 0.5
+        } else {
+            x_min + (x_max - x_min) * (i as f64) / ((res - 1) as f64)
+        };
+        xs.push(x);
+    }
+
+    let mut landscape = Array2::<f64>::zeros((levels, res));
+    landscape
+        .axis_iter_mut(Axis(1))
+        .into_par_iter()
+        .enumerate()
+        .for_each(|(xi, mut col)| {
+            col.fill(0.0);
+            let x = xs[xi];
+            let mut vals: Vec<f64> = Vec::with_capacity(pts.len());
+            for &(b, d) in pts.iter() {
+                if x <= b || x >= d {
+                    continue;
+                }
+                let left = x - b;
+                let right = d - x;
+                let val = left.min(right);
+                if val > 0.0 {
+                    vals.push(val);
+                }
+            }
+            if vals.is_empty() {
+                return;
+            }
+            vals.sort_by(|a, b| b.partial_cmp(a).unwrap());
+            for (level, slot) in col.iter_mut().enumerate() {
+                if level < vals.len() {
+                    *slot = vals[level];
+                } else {
+                    break;
+                }
+            }
+        });
+
+    let mut out = Vec::with_capacity(levels);
+    for row in landscape.axis_iter(Axis(0)) {
+        let summary = match summary_mode {
+            "max" => row.fold(0.0f64, |acc, &v| acc.max(v)),
+            _ => row.sum() / (res as f64),
+        };
+        out.push(summary as f32);
+    }
+    out
+}
+
+#[pyfunction]
+#[pyo3(signature = (births, pers, resolution, sigma, birth_range=None, pers_range=None))]
+fn persistence_image<'py>(
+    py: Python<'py>,
+    births: PyReadonlyArray1<f64>,
+    pers: PyReadonlyArray1<f64>,
+    resolution: usize,
+    sigma: f64,
+    birth_range: Option<(f64, f64)>,
+    pers_range: Option<(f64, f64)>,
+) -> PyResult<&'py PyArray1<f32>> {
+    let births_vec = births.as_array().to_vec();
+    let pers_vec = pers.as_array().to_vec();
+    let out = py.allow_threads(|| compute_image(&births_vec, &pers_vec, resolution, sigma, birth_range, pers_range));
+    Ok(PyArray1::from_vec(py, out))
+}
+
+#[pyfunction]
+#[pyo3(signature = (diagram, k, resolution, summary_mode="mean"))]
+fn persistence_landscape<'py>(
+    py: Python<'py>,
+    diagram: PyReadonlyArray2<f64>,
+    k: usize,
+    resolution: usize,
+    summary_mode: &str,
+) -> PyResult<&'py PyArray1<f32>> {
+    let diag_vec: Vec<(f64, f64)> = diagram
+        .as_array()
+        .rows()
+        .into_iter()
+        .map(|row| (row[0], row[1]))
+        .collect();
+    let out = py.allow_threads(|| compute_landscape(&diag_vec, k, resolution, summary_mode));
+    Ok(PyArray1::from_vec(py, out))
+}
+
 #[pyfunction]
 fn epsilon_for_lcc<'py>(_py: Python<'py>, x: PyReadonlyArray2<f64>, threshold: f64) -> PyResult<f64> {
     let x = x.as_array();
@@ -153,6 +368,8 @@ fn torpedocode_tda(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(queue_age_series, m)?)?;
     m.add_function(wrap_pyfunction!(queue_age_series_with_halts, m)?)?;
     m.add_function(wrap_pyfunction!(queue_age_levels, m)?)?;
+    m.add_function(wrap_pyfunction!(persistence_image, m)?)?;
+    m.add_function(wrap_pyfunction!(persistence_landscape, m)?)?;
     Ok(())
 }
 
