@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Dict, Iterable, Iterator
 
@@ -22,7 +23,7 @@ except Exception as e:  # pragma: no cover
 
 from ..config import ModelConfig, TrainingConfig, TopologyConfig, ExperimentConfig, DataConfig
 from ..training.samplers import BalancedBatchSampler
-from ..data.loader import LOBDatasetBuilder
+from ..data.loader import LOBDatasetBuilder, MarketDataLoader
 from ..utils.scaler import SplitSafeStandardScaler
 from ..evaluation.calibration import TemperatureScaler
 from ..evaluation.helpers import save_tpp_arrays_and_diagnostics, write_tda_backends_json
@@ -32,6 +33,7 @@ from ..evaluation.tpp import (
     model_and_empirical_frequencies,
     nll_per_event_from_arrays,
 )
+from ._windowing import resolve_row_slice
 
 
 def _window_batches(
@@ -254,6 +256,29 @@ def main():
     ap.add_argument(
         "--print-types-info", action="store_true", help="Print inferred num_event_types and exit"
     )
+    ap.add_argument(
+        "--train-window-events",
+        type=int,
+        default=None,
+        help="Limit splits to the most recent N events before training",
+    )
+    ap.add_argument(
+        "--train-window-step",
+        type=int,
+        default=None,
+        help="Stride (in events) when offsetting the training window",
+    )
+    ap.add_argument(
+        "--train-window-offset",
+        type=int,
+        default=0,
+        help="Number of strides to shift the window backward from the end",
+    )
+    ap.add_argument(
+        "--full-history",
+        action="store_true",
+        help="Disable automatic sliding window capping; load the entire cache",
+    )
     args = ap.parse_args()
 
     data = DataConfig(
@@ -281,6 +306,39 @@ def main():
     except Exception:
         pass
     builder = LOBDatasetBuilder(data)
+    mdl = MarketDataLoader(data)
+    row_slice: slice | None = None
+    row_meta = None
+    if args.train_window_events is not None or not bool(args.full_history):
+        try:
+            total = mdl.row_count(args.instrument)
+        except Exception as exc:
+            raise SystemExit(f"Failed to read cached rows for {args.instrument}: {exc}")
+        auto_env = os.environ.get("TORPEDOCODE_AUTO_WINDOW_EVENTS", "").strip()
+        auto_cap = None
+        if auto_env:
+            try:
+                auto_cap = int(auto_env)
+            except ValueError:
+                auto_cap = None
+        res = resolve_row_slice(
+            total_rows=total,
+            explicit_window=(
+                int(args.train_window_events)
+                if args.train_window_events is not None
+                else None
+            ),
+            step=(int(args.train_window_step) if args.train_window_step is not None else None),
+            offset=int(args.train_window_offset),
+            allow_auto=not bool(args.full_history),
+            auto_cap=auto_cap,
+        )
+        row_slice = res.row_slice
+        row_meta = res.meta
+    if row_slice is not None and row_meta is not None:
+        info = {"instrument": args.instrument}
+        info.update(row_meta)
+        print(json.dumps(info))
     scaler_path = args.artifact_dir / "scaler_schema.json"
     feat_schema_path = args.artifact_dir / "feature_schema.json"
     topo_cfg = None
@@ -343,6 +401,7 @@ def main():
             topology=topo_cfg,
             topo_stride=args.topo_stride,
             artifact_dir=args.artifact_dir,
+            row_slice=row_slice,
         )
         datasets = [(train, val, test)]
     else:
@@ -353,6 +412,7 @@ def main():
             topo_stride=args.topo_stride,
             folds=folds,
             artifact_dir=args.artifact_dir,
+            row_slice=row_slice,
         )
         datasets = [(tr, va, te) for (tr, va, te, _sc) in wf]
 
