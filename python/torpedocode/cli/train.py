@@ -22,7 +22,7 @@ except Exception as e:  # pragma: no cover
 
 from ..config import ModelConfig, TrainingConfig, TopologyConfig, ExperimentConfig, DataConfig
 from ..training.samplers import BalancedBatchSampler
-from ..data.loader import LOBDatasetBuilder
+from ..data.loader import LOBDatasetBuilder, MarketDataLoader
 from ..utils.scaler import SplitSafeStandardScaler
 from ..evaluation.calibration import TemperatureScaler
 from ..evaluation.helpers import save_tpp_arrays_and_diagnostics, write_tda_backends_json
@@ -254,6 +254,24 @@ def main():
     ap.add_argument(
         "--print-types-info", action="store_true", help="Print inferred num_event_types and exit"
     )
+    ap.add_argument(
+        "--train-window-events",
+        type=int,
+        default=None,
+        help="Limit splits to the most recent N events before training",
+    )
+    ap.add_argument(
+        "--train-window-step",
+        type=int,
+        default=None,
+        help="Stride (in events) when offsetting the training window",
+    )
+    ap.add_argument(
+        "--train-window-offset",
+        type=int,
+        default=0,
+        help="Number of strides to shift the window backward from the end",
+    )
     args = ap.parse_args()
 
     data = DataConfig(
@@ -281,6 +299,33 @@ def main():
     except Exception:
         pass
     builder = LOBDatasetBuilder(data)
+    mdl = MarketDataLoader(data)
+    row_slice: slice | None = None
+    if args.train_window_events is not None:
+        try:
+            total = mdl.row_count(args.instrument)
+        except Exception as exc:
+            raise SystemExit(f"Failed to read cached rows for {args.instrument}: {exc}")
+        window = max(1, int(args.train_window_events))
+        step = max(1, int(args.train_window_step) if args.train_window_step else window)
+        offset = max(0, int(args.train_window_offset))
+        stop = total - offset * step
+        if stop <= 0:
+            stop = min(total, window)
+        stop = min(total, stop)
+        start = max(0, stop - window)
+        if start >= stop:
+            start = max(0, stop - step)
+        row_slice = slice(start, stop)
+        print(
+            json.dumps(
+                {
+                    "instrument": args.instrument,
+                    "row_slice": [int(row_slice.start or 0), int(row_slice.stop or 0)],
+                    "events": int((row_slice.stop or 0) - (row_slice.start or 0)),
+                }
+            )
+        )
     scaler_path = args.artifact_dir / "scaler_schema.json"
     feat_schema_path = args.artifact_dir / "feature_schema.json"
     topo_cfg = None
@@ -343,6 +388,7 @@ def main():
             topology=topo_cfg,
             topo_stride=args.topo_stride,
             artifact_dir=args.artifact_dir,
+            row_slice=row_slice,
         )
         datasets = [(train, val, test)]
     else:
@@ -353,6 +399,7 @@ def main():
             topo_stride=args.topo_stride,
             folds=folds,
             artifact_dir=args.artifact_dir,
+            row_slice=row_slice,
         )
         datasets = [(tr, va, te) for (tr, va, te, _sc) in wf]
 

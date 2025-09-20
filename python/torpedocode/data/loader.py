@@ -30,8 +30,19 @@ class MarketDataLoader:
 
     config: DataConfig
 
-    def load_events(self, instrument: str) -> pd.DataFrame:
-        """Return a canonical event table for a specific instrument."""
+    def load_events(self, instrument: str, *, row_slice: slice | None = None) -> pd.DataFrame:
+        """Return a canonical event table for a specific instrument.
+
+        Parameters
+        ----------
+        instrument:
+            Instrument identifier used when caching.
+        row_slice:
+            Optional slice restricting which rows are read from the cached parquet file.
+            This enables memory-friendly windowed loading without materialising the full
+            dataset in RAM. Negative bounds are interpreted relative to the end of the
+            file, similar to Python slicing semantics.
+        """
 
         path = (self.config.cache_root / instrument).with_suffix(".parquet")
         if not path.exists():
@@ -39,7 +50,10 @@ class MarketDataLoader:
                 f"Expected cached parquet file at {path}. Generate caches via LOBPreprocessor first."
             )
 
-        frame = pd.read_parquet(path)
+        if row_slice is None:
+            frame = pd.read_parquet(path)
+        else:
+            frame = self._read_parquet_slice(path, row_slice)
         expected_columns = {"timestamp", "event_type", "size"}
         missing = expected_columns.difference(frame.columns)
         if missing:
@@ -49,6 +63,87 @@ class MarketDataLoader:
         frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
         return frame
 
+    def _read_parquet_slice(self, path: Path, row_slice: slice) -> pd.DataFrame:
+        """Read a subset of rows from a parquet file without loading the entire table."""
+
+        try:
+            import pyarrow as pa  # type: ignore
+            import pyarrow.parquet as pq  # type: ignore
+        except Exception as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError(
+                "pyarrow is required to read slices from cached parquet files; install pyarrow"
+            ) from exc
+
+        pf = pq.ParquetFile(path)
+        total = pf.metadata.num_rows
+        start = row_slice.start if row_slice.start is not None else 0
+        stop = row_slice.stop if row_slice.stop is not None else total
+        step = row_slice.step
+        if step not in (None, 1):
+            raise ValueError("row_slice.step is not supported; expected None or 1")
+
+        if start < 0:
+            start = max(total + start, 0)
+        if stop < 0:
+            stop = max(total + stop, 0)
+
+        start = max(0, min(start, total))
+        stop = max(0, min(stop, total))
+
+        if stop <= start or total == 0:
+            # Return empty frame with the correct schema
+            try:
+                empty = pf.schema.empty_table()
+            except AttributeError:  # pragma: no cover - older pyarrow
+                arrays = []
+                for field in pf.schema:
+                    arrays.append(pa.array([], type=field.type))
+                empty = pa.Table.from_arrays(arrays, names=pf.schema.names)
+            return empty.to_pandas()
+
+        tables = []
+        current = 0
+        for rg_idx in range(pf.num_row_groups):
+            rg_meta = pf.metadata.row_group(rg_idx)
+            rg_rows = rg_meta.num_rows
+            rg_start = current
+            rg_stop = current + rg_rows
+            current = rg_stop
+            if rg_stop <= start:
+                continue
+            if rg_start >= stop:
+                break
+            table = pf.read_row_group(rg_idx)
+            s = max(0, start - rg_start)
+            e = min(rg_rows, stop - rg_start)
+            if s > 0 or e < rg_rows:
+                table = table.slice(s, e - s)
+            tables.append(table)
+
+        if not tables:
+            return pd.DataFrame(columns=pf.schema.names)
+
+        table = pa.concat_tables(tables) if len(tables) > 1 else tables[0]
+        return table.to_pandas()
+
+    def row_count(self, instrument: str) -> int:
+        """Return the number of cached rows for an instrument without loading them."""
+
+        path = (self.config.cache_root / instrument).with_suffix(".parquet")
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Expected cached parquet file at {path}. Generate caches via LOBPreprocessor first."
+            )
+        try:
+            import pyarrow.parquet as pq  # type: ignore
+        except Exception as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError(
+                "pyarrow is required to inspect cached parquet metadata; install pyarrow"
+            ) from exc
+
+        pf = pq.ParquetFile(path)
+        return int(pf.metadata.num_rows)
+
 
 @dataclass(slots=True)
 class LOBDatasetBuilder:
@@ -56,11 +151,13 @@ class LOBDatasetBuilder:
 
     config: DataConfig
 
-    def build_sequence(self, instrument: str) -> Dict[str, np.ndarray]:
+    def build_sequence(
+        self, instrument: str, *, row_slice: slice | None = None
+    ) -> Dict[str, np.ndarray]:
         """Construct raw feature arrays and labels for one instrument."""
 
         mdl = MarketDataLoader(self.config)
-        df = mdl.load_events(instrument)
+        df = mdl.load_events(instrument, row_slice=row_slice)
         count_windows = None
         if getattr(self.config, "count_windows_s", None) is not None:
             import pandas as _pd
@@ -178,12 +275,13 @@ class LOBDatasetBuilder:
         topo_stride: int = 1,
         folds: int = 3,
         artifact_dir: Optional[Path] = None,
+        row_slice: slice | None = None,
     ) -> List[Tuple[Dict, Dict, Dict, SplitSafeStandardScaler]]:
         """Return a list of (train,val,test,scaler) splits for k-step walk-forward.
 
         Uses cumulative train windows and equal-sized val/test windows across folds.
         """
-        rec = self.build_sequence(instrument)
+        rec = self.build_sequence(instrument, row_slice=row_slice)
         T = len(rec["timestamps"])
         k = max(1, int(folds))
         # Partition the last 40% into k segments; training grows cumulatively from 0 to each segment start
@@ -256,10 +354,11 @@ class LOBDatasetBuilder:
         topology: Optional[TopologyConfig] = None,
         topo_stride: int = 1,
         artifact_dir: Optional[Path] = None,
+        row_slice: slice | None = None,
     ) -> Tuple[Dict, Dict, Dict, SplitSafeStandardScaler]:
         """Create walk-forward train/val/test sets with split-safe scaling and PH features."""
 
-        rec = self.build_sequence(instrument)
+        rec = self.build_sequence(instrument, row_slice=row_slice)
         T = len(rec["timestamps"])
         t0 = int(0.6 * T)
         v0 = int(0.8 * T)
