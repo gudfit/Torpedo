@@ -36,7 +36,12 @@ def build_rust(verbose: bool = True) -> None:
                 print(f"[rust] Skipping {name}: Cargo.toml not found at {rel}")
             continue
         if maturin:
-            code = run(["maturin", "develop", "-m", str(rel), "--release"], verbose=verbose)
+            # Handle common env clash where both VIRTUAL_ENV and CONDA_PREFIX are set
+            base = ["maturin"]
+            if os.environ.get("VIRTUAL_ENV") and os.environ.get("CONDA_PREFIX"):
+                # Prefer the active virtualenv; remove conda hint for maturin
+                base = ["env", "-u", "CONDA_PREFIX", "maturin"]
+            code = run(base + ["develop", "-m", str(rel), "--release"], verbose=verbose)
             if code == 0:
                 print(f"[rust] Built {name} via maturin")
                 built_any = True
