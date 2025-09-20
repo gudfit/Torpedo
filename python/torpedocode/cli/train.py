@@ -55,9 +55,16 @@ def _window_batches(
     if bptt <= 0 or bptt > T:
         bptt = T
     ends = np.arange(bptt - 1, T)
+    # Fallback: ensure at least one window (last bptt slice) to avoid empty loader
+    if ends.size == 0 and T > 0:
+        ends = np.array([T - 1], dtype=int)
+        bptt = min(T, max(1, bptt))
+    # Guard batch size
+    if batch_size is None or int(batch_size) <= 0:
+        batch_size = max(1, int(ends.size))
     y_end = y[ends]
     if balanced:
-        sampler = BalancedBatchSampler(labels=y_end.tolist(), batch_size=batch_size)
+        sampler = BalancedBatchSampler(labels=y_end.tolist(), batch_size=max(1, int(batch_size)))
         for idx in sampler:
             idx = np.asarray(idx)
             idx = np.clip(idx, 0, len(ends) - 1)
@@ -85,7 +92,8 @@ def _window_batches(
                 batch["market_ids"] = to_tensor(mids)
             yield batch
     else:
-        for i in range(0, len(ends), batch_size):
+        step = max(1, int(batch_size))
+        for i in range(0, len(ends), step):
             idx = ends[i : i + batch_size]
             feats = np.stack([X[e - bptt + 1 : e + 1] for e in idx], axis=0)
             topo = np.stack([Z[e - bptt + 1 : e + 1] for e in idx], axis=0)
@@ -163,6 +171,7 @@ def main():
         raise SystemExit("PyTorch is required for training CLI: pip install torch")
     ap = argparse.ArgumentParser(description="Train hybrid model with TBPTT and balanced windows.")
     ap.add_argument("--instrument", required=True)
+    ap.add_argument("--cache-root", type=Path, default=Path("."))
     ap.add_argument("--label-key", required=True)
     ap.add_argument("--artifact-dir", type=Path, required=True)
     ap.add_argument("--epochs", type=int, default=5)
@@ -248,8 +257,8 @@ def main():
     args = ap.parse_args()
 
     data = DataConfig(
-        raw_data_root=Path("."),
-        cache_root=Path("."),
+        raw_data_root=Path(str(args.cache_root)),
+        cache_root=Path(str(args.cache_root)),
         instruments=[args.instrument],
         expand_event_types_by_level=bool(args.expand_types_by_level),
         count_windows_s=args.count_windows_s,
@@ -438,7 +447,7 @@ def main():
     pipe = TrainingPipeline(exp, model, loss)
 
     def to_loader(
-        split: Dict[str, np.ndarray], balanced: bool
+        split: Dict[str, np.ndarray], *, bptt: int, batch_size: int, balanced: bool
     ) -> Iterable[Dict[str, torch.Tensor]]:
         mids = None
         if bool(args.include_market_embedding):
@@ -447,8 +456,8 @@ def main():
             split["features"],
             split["topology"],
             split["labels"],
-            bptt=args.bptt,
-            batch_size=args.batch,
+            bptt=bptt,
+            batch_size=batch_size,
             balanced=balanced,
             event_type_ids=split.get("event_type_ids"),
             delta_t=split.get("delta_t"),
@@ -465,7 +474,29 @@ def main():
     for i, (train, val, test) in enumerate(datasets, start=1):
         fold_dir = args.artifact_dir if folds == 1 else (args.artifact_dir / f"fold_{i}")
         fold_dir.mkdir(parents=True, exist_ok=True)
-        metrics = pipe.fit(to_loader(train, balanced=True), to_loader(val, balanced=False))
+        # Robust batching: if train window count is tiny or all one class, avoid balanced sampling surprises
+        T_train = int(len(train.get("labels", [])))
+        bptt_eff = int(args.bptt)
+        if bptt_eff > T_train:
+            bptt_eff = T_train
+        n_windows = max(0, T_train - bptt_eff + 1)
+        train_labels = train.get("labels", np.array([], dtype=int))
+        y_end = train_labels[bptt_eff - 1 : bptt_eff - 1 + n_windows] if n_windows > 0 else np.array([], dtype=int)
+        unique = np.unique(y_end) if y_end.size else np.array([], dtype=int)
+        train_balanced = True
+        batch_eff = int(args.batch)
+        if n_windows <= 0:
+            # Ensure we can produce at least one batch
+            bptt_eff = max(1, min(T_train, 16))
+            n_windows = max(0, T_train - bptt_eff + 1)
+        if n_windows > 0 and batch_eff > n_windows:
+            batch_eff = n_windows
+        if unique.size < 2:
+            train_balanced = False
+        metrics = pipe.fit(
+            to_loader(train, bptt=bptt_eff, batch_size=batch_eff, balanced=train_balanced),
+            to_loader(val, bptt=args.bptt, batch_size=args.batch, balanced=False),
+        )
         Tcal = None
         if bool(exp.training.apply_temperature_scaling):
             with torch.no_grad():

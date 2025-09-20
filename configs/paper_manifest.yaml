@@ -1,0 +1,55 @@
+# Paper-style end-to-end manifest
+# Usage:
+#   uv run python -m torpedocode.cli.manifest --manifest configs/paper_manifest.yaml
+
+data:
+  # Path to NDJSON/JSONL file or directory containing them
+  input: ./data/ndjson_or_dir
+  # Destination for cached parquet(s)
+  cache_root: ./cache
+
+  # If merging multiple files into one instrument, set the instrument name.
+  # If omitted and a single file is provided, the file stem is used.
+  instrument: AAPL
+
+  # Paper defaults for fair comparisons
+  drop_auctions: true           # exclude auctions/halts
+  session_tz: America/New_York  # market-local session hours for filtering
+  tick_size: 0.01
+  levels: 10
+
+  # Label horizons (clock-time in seconds, and event-count)
+  horizons_s: [1, 5, 10]
+  horizons_events: [100, 500]
+  # Instability threshold |Δmid| > eta (0.0 = any nonzero change)
+  eta: 0.0
+
+train:
+  artifact_root: ./artifacts
+  label_key: instability_s_5
+  epochs: 3
+  batch: 128
+  bptt: 64
+  topo_stride: 5
+  device: cpu
+
+  # Diagnostics and calibration
+  temperature_scale: true
+  tpp_diagnostics: true
+
+  # Topology options forwarded to training
+  use_topo_selected: true        # reuse artifacts/topo/<instrument>/topology_selected.json when present
+  # topology_json: ./artifacts/topo/AAPL/topology_selected.json
+  # pi_res: 128
+  # pi_sigma: 0.05
+
+  # Optional: expand LO/CX into level-tagged event types for the TPP head
+  # expand_types_by_level: true
+
+aggregate:
+  mode: pred
+  output: ./artifacts/aggregate.json
+  block_bootstrap: true
+  block_length: 50
+  n_boot: 200
+

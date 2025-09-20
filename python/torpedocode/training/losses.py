@@ -113,20 +113,13 @@ class HybridLossComputer:
             else:
                 raise ValueError(f"Unknown classification loss type: {self.cls_loss_type}")
 
-        # FIX: temporal point process + mark likelihood (only if data present)
-        # Expected batch keys:
-        # - event_type_ids: LongTensor[B, T] in [0, M-1]
-        # - delta_t: FloatTensor[B, T] inter-event times (seconds)
-        # - sizes: FloatTensor[B, T] positive marks (optional)
         if (
             "event_type_ids" in batch
             and "delta_t" in batch
             and outputs.intensities
             and outputs.mark_params
         ):
-            heads = [
-                outputs.intensities[f"event_{i}"] for i in range(len(outputs.intensities))
-            ]
+            heads = [outputs.intensities[f"event_{i}"] for i in range(len(outputs.intensities))]
             lamb = torch.cat(heads, dim=-1).clamp_min(1e-12)
             device = lamb.device
             dtype = lamb.dtype
@@ -194,13 +187,11 @@ class HybridLossComputer:
                         smoothness = dl.pow(2).sum()
                     elif self.smoothness_norm == "per_seq":
                         per_seq = dl.pow(2).sum(dim=(1, 2))
-                        pairs = (
-                            torch.tensor(
-                                dl.shape[1] * dl.shape[2],
-                                device=dl.device,
-                                dtype=dl.dtype,
-                            ).clamp_min(1.0)
-                        )
+                        pairs = torch.tensor(
+                            dl.shape[1] * dl.shape[2],
+                            device=dl.device,
+                            dtype=dl.dtype,
+                        ).clamp_min(1.0)
                         smoothness = (per_seq / pairs).mean()
                     else:
                         smoothness = (dl.pow(2).sum(dim=(-1, -2))).mean()

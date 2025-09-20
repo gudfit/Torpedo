@@ -86,6 +86,9 @@ def main():
         argv += ["--horizons-events", *[str(x) for x in data["horizons_events"]]]
     if data.get("eta") is not None:
         argv += ["--eta", str(float(data["eta"]))]
+    # Optional: honor market session time zone for auction/halts filtering
+    if data.get("session_tz") is not None:
+        argv += ["--session-tz", str(data["session_tz"])]
 
     import sys
 

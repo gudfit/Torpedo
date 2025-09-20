@@ -87,10 +87,14 @@ def build_torch(cuda: bool = False, verbose: bool = True) -> None:
         return
 
     cpp = ROOT / "cpp" / "src" / "extension.cpp"
+    tpp = ROOT / "cpp" / "src" / "tpp_loss.cpp"
     cu = ROOT / "cpp" / "src" / "lob_kernels.cu"
 
     name = "torpedocode_kernels"
+    # Always include C++ sources that define symbols referenced by extension.cpp
     sources = [str(cpp)]
+    if tpp.exists():
+        sources.append(str(tpp))
     # Ensure C++17 for host compilation; CUDA will inherit as needed
     extra_cflags = ["-O3", "-std=c++17"]
     extra_cuda_cflags = ["-O3", "-std=c++17"]

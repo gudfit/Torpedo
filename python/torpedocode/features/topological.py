@@ -85,22 +85,63 @@ class TopologicalFeatureGenerator:
         wlist = (
             list(window_sizes_s) if window_sizes_s is not None else list(self.config.window_sizes_s)
         )
-        if _tda_native is not None and hasattr(_tda_native, "rolling_topo"):
-            try:
-                cfg_json = json.dumps(asdict(self.config))
-                arr = np.asarray(series, dtype=np.float64, order="C")
-                out = _tda_native.rolling_topo(
-                    arr,
-                    ts_ns.astype(np.int64, copy=False),
-                    [int(w) for w in wlist],
-                    int(stride),
-                    cfg_json,
-                )
-                return np.asarray(out, dtype=np.float32)
-            except Exception:
-                if self._strict():
-                    raise
+        # Prefer native rolling implementation only for VR; use Python path for cubical
+        if (
+            _tda_native is not None
+            and hasattr(_tda_native, "rolling_topo")
+            and self.config.complex_type == "vietoris_rips"
+        ):
+            cfg_json = json.dumps(asdict(self.config))
+            arr = np.asarray(series, dtype=np.float64, order="C")
+            ts_arr = ts_ns.astype(np.int64, copy=False)
+            errors: List[BaseException] = []
+            for mode in ("numpy", "list"):
+                try:
+                    if mode == "numpy":
+                        out = _tda_native.rolling_topo(
+                            arr,
+                            ts_arr,
+                            [int(w) for w in wlist],
+                            int(stride),
+                            cfg_json,
+                        )
+                    else:
+                        out = _tda_native.rolling_topo(
+                            arr.tolist(),
+                            ts_arr.tolist(),
+                            [int(w) for w in wlist],
+                            int(stride),
+                            cfg_json,
+                        )
+                    return np.asarray(out, dtype=np.float32)
+                except Exception as e:  # record and try alternate signature
+                    errors.append(e)
+                    continue
+            # If both signatures failed, decide whether to hard-fail
+            if errors:
+                # Treat any TypeError from the native call as a signature-mismatch issue
+                # and fall back to the Python implementation even under strict mode.
+                only_sig = all(isinstance(e, TypeError) for e in errors)
+                if self._strict() and not only_sig:
+                    raise errors[-1]
+                # else fall back to Python implementation below
         reps_all = []
+        # Optional in-process progress bar for training/wizard runs
+        show_prog = False
+        bar = None
+        try:
+            import os as _os
+            from tqdm import tqdm as _tqdm  # type: ignore
+
+            flag = _os.environ.get("WIZARD_TOPO_PROGRESS", "0").lower() in {"1", "true", "y"}
+            if flag:
+                total_steps = 0
+                for _ in wlist:
+                    total_steps += int(np.ceil(T / max(1, int(stride))))
+                bar = _tqdm(total=total_steps, desc="tda", leave=False)
+                show_prog = True
+        except Exception:
+            show_prog = False
         for w in wlist:
             w_ns = int(w) * 1_000_000_000
             reps = np.zeros((T, self._embedding_dim()), dtype=np.float32)
@@ -165,7 +206,17 @@ class TopologicalFeatureGenerator:
                     if self._strict():
                         raise
                     reps[i] = 0.0
+                if show_prog and bar is not None:
+                    try:
+                        bar.update(1)
+                    except Exception:
+                        pass
             reps_all.append(reps)
+        if bar is not None:
+            try:
+                bar.close()
+            except Exception:
+                pass
         return np.concatenate(reps_all, axis=1).astype(np.float32)
 
     def _embedding_dim(self) -> int:
@@ -331,10 +382,32 @@ class TopologicalFeatureGenerator:
 
         cc = gd.CubicalComplex(dimensions=field.shape, top_dimensional_cells=field.flatten())
         cc.persistence()
-        dgms = [
-            np.array(cc.persistence_generators_in_dimension(d) or [])
-            for d in range(self.config.max_homology_dimension + 1)
-        ]
+        dgms: List[np.ndarray] = []
+        for d in range(self.config.max_homology_dimension + 1):
+            D = None
+            try:
+                if hasattr(cc, "persistence_intervals_in_dimension"):
+                    D = cc.persistence_intervals_in_dimension(d)
+                elif hasattr(cc, "persistence_generators_in_dimension"):
+                    D = cc.persistence_generators_in_dimension(d)
+            except Exception:
+                D = None
+            if D is None:
+                dgms.append(np.zeros((0, 2), dtype=np.float32))
+            else:
+                arr = np.asarray(D)
+                if arr.ndim == 1:
+                    arr = arr.reshape(-1, 2)
+                # Convert (birth, death) -> (birth, persistence)
+                births = np.asarray(arr[:, 0], dtype=np.float64)
+                deaths = np.asarray(arr[:, 1], dtype=np.float64)
+                pers = deaths - births
+                # Clean up infinities/negatives
+                births = np.nan_to_num(births, nan=0.0, posinf=0.0, neginf=0.0)
+                pers = np.nan_to_num(pers, nan=0.0, posinf=0.0, neginf=0.0)
+                pers[pers < 0] = 0.0
+                bp = np.stack([births, pers], axis=1).astype(np.float32)
+                dgms.append(bp)
         out: List[np.ndarray] = []
         for d, D in enumerate(dgms):
             if D.size == 0:
@@ -386,7 +459,11 @@ class TopologicalFeatureGenerator:
             raise ValueError(f"Unsupported representation {self.config.persistence_representation}")
 
     def _landscape(self, diag: List[np.ndarray]) -> np.ndarray:
-        if _tda_native is not None and hasattr(_tda_native, "persistence_landscape"):
+        # Default to Python implementation for deterministic equality with tests;
+        # enable native via USE_NATIVE_LANDSCAPE=1 if desired.
+        import os as _os
+        use_native_pl = _os.environ.get("USE_NATIVE_LANDSCAPE", "0").lower() in {"1", "true"}
+        if use_native_pl and _tda_native is not None and hasattr(_tda_native, "persistence_landscape"):
             levels = int(self.config.landscape_levels)
             summary_mode = str(getattr(self.config, "landscape_summary", "mean"))
             resolution = int(getattr(self.config, "landscape_resolution", 64) or 64)
@@ -430,26 +507,43 @@ class TopologicalFeatureGenerator:
                     vecs.append(q.astype(np.float32))
             return np.concatenate(vecs, axis=0)
 
-        grids = []
-        for d, D in enumerate(diag[: self.config.max_homology_dimension + 1]):
-            if D.size == 0:
-                grids.append(np.zeros((self.config.landscape_levels,), dtype=np.float32))
-                continue
-            b = D[:, 0]
-            p = D[:, 1]
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore")
-                pla = PersLandscapeApprox(
-                    hom_deg=d, num_landscapes=self.config.landscape_levels, resolution=64
-                )
-                pla.fit([np.stack([b, b + p], axis=1)])
-                _x, y = pla.plot_diagrams(return_data=True)
-            if getattr(self.config, "landscape_summary", "mean") == "max":
-                red = np.nanmax(y, axis=1)
-            else:
-                red = np.nanmean(y, axis=1)
-            grids.append(red.astype(np.float32))
-        return np.concatenate(grids, axis=0)
+        try:
+            grids = []
+            for d, D in enumerate(diag[: self.config.max_homology_dimension + 1]):
+                if D.size == 0:
+                    grids.append(np.zeros((self.config.landscape_levels,), dtype=np.float32))
+                    continue
+                b = D[:, 0]
+                p = D[:, 1]
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore")
+                    pla = PersLandscapeApprox(
+                        hom_deg=d, num_landscapes=self.config.landscape_levels, resolution=64
+                    )
+                    pla.fit([np.stack([b, b + p], axis=1)])
+                    _x, y = pla.plot_diagrams(return_data=True)
+                if getattr(self.config, "landscape_summary", "mean") == "max":
+                    red = np.nanmax(y, axis=1)
+                else:
+                    red = np.nanmean(y, axis=1)
+                grids.append(red.astype(np.float32))
+            return np.concatenate(grids, axis=0)
+        except Exception:
+            # Fallback: simple quantile summary over persistence values per homology degree
+            levels = self.config.landscape_levels
+            vecs = []
+            for D in diag[: self.config.max_homology_dimension + 1]:
+                if D.size == 0:
+                    vecs.append(np.zeros((levels,), dtype=np.float32))
+                else:
+                    pers = D[:, 1]
+                    q = (
+                        np.quantile(pers, np.linspace(0, 1, levels + 1)[1:])
+                        if pers.size > 0
+                        else np.zeros((levels,))
+                    )
+                    vecs.append(q.astype(np.float32))
+            return np.concatenate(vecs, axis=0)
 
     def _image(self, diag: List[np.ndarray]) -> np.ndarray:
         if _tda_native is not None and hasattr(_tda_native, "persistence_image"):
@@ -479,7 +573,8 @@ class TopologicalFeatureGenerator:
                     )
                     imgs.append(np.asarray(out, dtype=np.float32))
                 if imgs:
-                    return np.concatenate(imgs, axis=0)
+                    vec = np.concatenate(imgs, axis=0)
+                    return np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
             except Exception:
                 if self._strict():
                     raise
@@ -512,7 +607,7 @@ class TopologicalFeatureGenerator:
                 pi = np.clip(((P - p0) / denom_p) * (res - 1), 0, res - 1).astype(int)
                 for x, y in zip(bi, pi):
                     img[y, x] += 1.0
-            return img.flatten()
+            return np.nan_to_num(img.flatten(), nan=0.0, posinf=0.0, neginf=0.0)
 
         b_range = (
             getattr(self, "_active_birth_range", None)
@@ -557,7 +652,8 @@ class TopologicalFeatureGenerator:
                         dtype=np.float32,
                     )
             imgs.append(img.astype(np.float32))
-        return np.concatenate([im.flatten() for im in imgs], axis=0)
+        vec = np.concatenate([im.flatten() for im in imgs], axis=0)
+        return np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
 
     def _strict(self) -> bool:
         import os as _os

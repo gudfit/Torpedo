@@ -17,6 +17,50 @@ except Exception:
     tqdm = None  # type: ignore
 
 
+def _summary_banner(artifact_root: Path, instrument: str, *, label_key: str | None = None) -> None:
+    """Print a compact summary of key artifact paths for one instrument.
+
+    If label_key is None, summarize all label subfolders under the instrument.
+    """
+    base = artifact_root / instrument
+    if label_key is None:
+        import glob
+        pattern = str(base / "*" / "predictions_test.csv")
+        files = sorted(glob.glob(pattern))
+        if not files:
+            print("[Summary] No predictions found under", base)
+            return
+        print("\n[Summary — Artifacts]")
+        for f in files:
+            p = Path(f)
+            d = p.parent
+            print(f"- [{d.name}] Predictions (test): {p}")
+            val = d / "predictions_val.csv"
+            if val.exists():
+                print(f"  Predictions (val):  {val}")
+            ev = d / "eval_fast.json"
+            if ev.exists():
+                print(f"  Fast eval:          {ev}")
+            print(f"  Schemas:            {d / 'feature_schema.json'}, {d / 'scaler_schema.json'}")
+            print(f"  Splits:             {d / 'split_indices.json'}")
+            print(f"  TPP arrays/diag:    {d / 'tpp_test_arrays.npz'}, {d / 'tpp_test_diagnostics.json'}")
+            print(f"  Training meta:      {d / 'training_meta.json'}")
+            print(f"  TDA backends:       {d / 'tda_backends.json'}")
+    else:
+        d = base / label_key
+        print("\n[Summary — Artifacts]")
+        print(f"- Predictions (test): {d / 'predictions_test.csv'}")
+        print(f"- Predictions (val):  {d / 'predictions_val.csv'}")
+        ev = d / 'eval_fast.json'
+        if ev.exists():
+            print(f"- Fast eval:          {ev}")
+        print(f"- Schemas:            {d / 'feature_schema.json'}, {d / 'scaler_schema.json'}")
+        print(f"- Splits:             {d / 'split_indices.json'}")
+        print(f"- TPP arrays/diag:    {d / 'tpp_test_arrays.npz'}, {d / 'tpp_test_diagnostics.json'}")
+        print(f"- Training meta:      {d / 'training_meta.json'}")
+        print(f"- TDA backends:       {d / 'tda_backends.json'}")
+
+
 def prompt(msg: str, default: str | None = None) -> str:
     sfx = f" [{default}]" if default is not None else ""
     val = input(f"{msg}{sfx}: ").strip()
@@ -326,10 +370,38 @@ def fast_eval_predictions(artifact_root: Path, instrument: str) -> None:
                     out.write_text(_json.dumps(out_obj, indent=2))
             else:
                 out.write_text(_json.dumps(out_obj, indent=2))
-            if tqdm is None:
-                print(f"[fast-eval] wrote {out}")
+            # Always print where results were written so users can find them
+            print(f"[fast-eval] wrote {out}")
         except Exception as e:
             print(f"[fast-eval] error evaluating {f}: {e}")
+
+
+def pack_artifacts(artifact_root: Path, output: Path | None = None) -> None:
+    """Bundle key artifacts into a zip using scripts/paper_pack.py.
+
+    If output is None, writes artifacts/paper_bundle.zip under artifact_root's parent.
+    """
+    try:
+        out = (
+            output
+            if output is not None
+            else (artifact_root / "paper_bundle.zip")
+        )
+        cmd = [
+            sys.executable,
+            "scripts/paper_pack.py",
+            "--artifact-root",
+            str(artifact_root),
+            "--output",
+            str(out),
+        ]
+        code = run(cmd)
+        if code == 0:
+            print(f"[wizard] Paper bundle created → {out}")
+        else:
+            print("[wizard] Paper pack failed; see logs above.")
+    except Exception as e:
+        print(f"[wizard] Error creating paper bundle: {e}")
 
 
 def quick_run_hints():
@@ -351,24 +423,189 @@ def quick_run_hints():
     )
 
 
-def main():
-    env_check()
-    if yesno("Run native build helper?", default=True):
-        build_native_step()
-    if yesno("Set strict TDA for this session?", default=False):
-        os.environ["PAPER_TORPEDO_STRICT_TDA"] = "1"
-        print("[wizard] PAPER_TORPEDO_STRICT_TDA=1 (strict TDA enabled)")
-    quick_run_hints()
+def option_quick_demo(cache_root: Path) -> None:
+    """Quick synthetic demo: generate a tiny NDJSON, cache, train, eval, and pack.
+
+    No external data required. Uses simple synthetic LOB snapshots with L=5 levels.
+    """
+    try:
+        import pandas as pd
+        import numpy as np
+    except Exception as e:
+        print(f"[demo] pandas/numpy required: {e}")
+        return
+    symbol = prompt("Demo instrument symbol", default="DEMO")
+    L = int(prompt("Levels L", default="5") or "5")
+    T = int(prompt("Events T", default="600") or "600")
+    tick = float(prompt("Tick size", default="0.01") or "0.01")
+    eta = float(prompt("Instability threshold eta (abs mid change)", default="0.02") or "0.02")
+    # Auto-tune sequence/window sizes to avoid empty loaders on tiny demos
+    auto_tune = yesno("Auto-tune bptt/batch for this demo?", default=True)
+    bptt_opt = 64
+    batch_opt = 128
+    if auto_tune:
+        T_train = max(1, int(0.6 * T))
+        # Aim for a handful of windows while keeping sequence length reasonable
+        bptt_opt = int(max(8, min(64, max(1, T_train // 4))))
+        n_windows = max(0, T_train - bptt_opt + 1)
+        if n_windows <= 0:
+            bptt_opt = max(1, min(16, T_train))
+            n_windows = max(0, T_train - bptt_opt + 1)
+        batch_opt = int(max(8, min(128, n_windows if n_windows > 0 else 8)))
+    print("[demo] generating synthetic NDJSON…")
+    rng = np.random.default_rng(7)
+    base = 100.0
+    # Simple random walk for mid, spread ~ 2 ticks
+    steps = rng.normal(0, tick, size=T).cumsum()
+    mid = base + steps
+    spr = np.full(T, 2 * tick)
+    bid1 = mid - spr / 2
+    ask1 = mid + spr / 2
+    ts = pd.date_range("2024-06-03 14:00:00Z", periods=T, freq="s")
+    rows = []
+    etypes = ["MO+", "MO-", "LO+", "LO-", "CX+", "CX-"]
+    for i in range(T):
+        rec = {
+            "timestamp": ts[i].isoformat(),
+            "event_type": str(rng.choice(etypes)),
+            "size": float(np.exp(rng.normal(0.0, 0.4))),
+        }
+        # random level and side for LO/CX
+        lvl = int(rng.integers(1, L + 1))
+        rec["level"] = lvl
+        rec["side"] = ("bid" if rec["event_type"].endswith("+") else "ask")
+        # prices and sizes per level
+        for l in range(1, L + 1):
+            rec[f"bid_price_{l}"] = float(bid1[i] - (l - 1) * tick)
+            rec[f"ask_price_{l}"] = float(ask1[i] + (l - 1) * tick)
+            rec[f"bid_size_{l}"] = float(rng.gamma(2.0, 50.0))
+            rec[f"ask_size_{l}"] = float(rng.gamma(2.0, 50.0))
+        rows.append(rec)
+    tmp = cache_root / "_demo"
+    tmp.mkdir(parents=True, exist_ok=True)
+    ndjson = tmp / f"{symbol}.ndjson"
+    with ndjson.open("w") as f:
+        for r in rows:
+            import json as _json
+
+            f.write(_json.dumps(r) + "\n")
+    print(f"[demo] wrote {ndjson}")
+    # Cache → train → eval → pack
+    print("[demo] caching to parquet…")
+    run([
+        sys.executable,
+        "-m",
+        "torpedocode.cli.cache",
+        "--input",
+        str(ndjson),
+        "--cache-root",
+        str(cache_root),
+        "--instrument",
+        symbol,
+        "--drop-auctions",
+        "--session-tz",
+        "America/New_York",
+        "--levels",
+        str(L),
+        "--horizons-s",
+        "1",
+        "5",
+        "10",
+        "--horizons-events",
+        "100",
+        "500",
+        "--eta",
+        str(eta),
+    ])
+    # Optional: quick topology search and reuse selection
+    use_topo = False
+    topo_art_dir = Path("./artifacts/topo") / symbol
+    if yesno("Run quick topology search and reuse selected config?", default=True):
+        strict = yesno("Strict TDA for topology search?", default=False)
+        run(
+            [
+                sys.executable,
+                "-m",
+                "torpedocode.cli.topo_search",
+                "--cache-root",
+                str(cache_root),
+                "--instrument",
+                symbol,
+                "--label-key",
+                "instability_s_5",
+                "--artifact-dir",
+                str(topo_art_dir),
+                *( ["--strict-tda"] if strict else [] ),
+            ]
+        )
+        if (topo_art_dir / "topology_selected.json").exists():
+            use_topo = True
+
+    print("[demo] training (CPU)…")
+    art = Path("./artifacts").resolve()
+    # Optional strict TDA and progress during training
+    strict_train = yesno("Strict TDA during training?", default=False)
+    show_tda_prog = yesno("Show topology feature progress during training?", default=True)
+    if show_tda_prog:
+        os.environ["WIZARD_TOPO_PROGRESS"] = "1"
+    run(
+        [
+            sys.executable,
+            "-m",
+            "torpedocode.cli.train",
+            "--instrument",
+            symbol,
+            "--cache-root",
+            str(cache_root),
+            "--label-key",
+            "instability_s_5",
+            "--artifact-dir",
+            str(art / symbol / "instability_s_5"),
+            "--epochs",
+            "2",
+            "--batch",
+            str(batch_opt if auto_tune else 128),
+            "--bptt",
+            str(bptt_opt if auto_tune else 64),
+            "--topo-stride",
+            "5",
+            "--device",
+            "cpu",
+            "--tpp-diagnostics",
+            *( ["--use-topo-selected"] if use_topo else [] ),
+            *( ["--strict-tda"] if strict_train else [] ),
+        ]
+    )
+    eval_ran = False
+    if yesno("Run fast eval now?", default=True):
+        fast_eval_predictions(art, symbol)
+        eval_ran = True
+    if yesno("Pack artifacts into paper_bundle.zip?", default=True):
+        pack_artifacts(art)
+    # Summary banner of key artifact paths
+    pfx = art / symbol / "instability_s_5"
+    print("\n[Summary — Demo Artifacts]")
+    print(f"- Predictions (test): {pfx / 'predictions_test.csv'}")
+    print(f"- Predictions (val):  {pfx / 'predictions_val.csv'}")
+    if eval_ran:
+        print(f"- Fast eval:          {pfx / 'eval_fast.json'}")
+    print(f"- Schemas:            {pfx / 'feature_schema.json'}, {pfx / 'scaler_schema.json'}")
+    print(f"- Splits:             {pfx / 'split_indices.json'}")
+    print(f"- TPP arrays/diag:    {pfx / 'tpp_test_arrays.npz'}, {pfx / 'tpp_test_diagnostics.json'}")
+    print(f"- Training meta:      {pfx / 'training_meta.json'}")
+    print(f"- TDA backends:       {pfx / 'tda_backends.json'}")
 
 
-if __name__ == "__main__":
-    main()
+# Note: Single main() defined at the end of the file.
 
 
 def option_crypto(cache_root: Path):
     print("Option A — Free crypto (Binance/Coinbase)")
     source = prompt("Choose source [binance/coinbase]", default="binance").lower()
     symbol = prompt("Symbol (e.g., BTCUSDT or BTC-USD)")
+    eta = float(
+        prompt("Instability threshold eta (abs mid change)", default="0.02") or "0.02"
+    )
     raw_dir = Path(prompt("Raw dir (will create if downloading)", default="./raw")).resolve()
     raw_dir.mkdir(parents=True, exist_ok=True)
 
@@ -565,6 +802,8 @@ def option_crypto(cache_root: Path):
             str(cache_root),
             "--instrument",
             symbol,
+            "--eta",
+            str(eta),
         ]
     )
     if code != 0:
@@ -574,6 +813,7 @@ def option_crypto(cache_root: Path):
             prompt("Topology artifact dir", default=str(Path("./artifacts/topo") / symbol))
         ).resolve()
         label_key = prompt("Label key", default="instability_s_5")
+        strict = yesno("Strict TDA for topology search?", default=False)
         run(
             [
                 sys.executable,
@@ -587,6 +827,7 @@ def option_crypto(cache_root: Path):
                 label_key,
                 "--artifact-dir",
                 str(topo_art),
+                *( ["--strict-tda"] if strict else [] ),
             ]
         )
     if yesno("Run quick multi-horizon report?", default=True):
@@ -609,6 +850,28 @@ def option_crypto(cache_root: Path):
     if caches and yesno("Batch train across all instruments in cache-root?", default=False):
         dev_default = "cuda" if _torch_cuda_available() else "cpu"
         device = prompt("Device [cpu/cuda]", default=dev_default)
+        # Auto-tune bptt/batch from cache size when possible
+        auto_tune = yesno("Auto-tune bptt/batch?", default=True)
+        bptt_opt = 64
+        batch_opt = 128
+        strict_train = yesno("Strict TDA during training?", default=False)
+        show_tda_prog = yesno("Show topology feature progress during training?", default=True)
+        if show_tda_prog:
+            os.environ["WIZARD_TOPO_PROGRESS"] = "1"
+        if auto_tune:
+            try:
+                import pandas as _pd
+                # Estimate using first cache file
+                n0 = len(_pd.read_parquet(caches[0]))
+                T_train = max(1, int(0.6 * n0))
+                bptt_opt = int(max(8, min(64, max(1, T_train // 4))))
+                n_windows = max(0, T_train - bptt_opt + 1)
+                if n_windows <= 0:
+                    bptt_opt = max(1, min(16, T_train))
+                    n_windows = max(0, T_train - bptt_opt + 1)
+                batch_opt = int(max(8, min(128, n_windows if n_windows > 0 else 8)))
+            except Exception:
+                pass
         labels = prompt(
             "Label keys (space-separated)", default="instability_s_1 instability_s_5"
         ).split()
@@ -632,15 +895,71 @@ def option_crypto(cache_root: Path):
             device,
             "--use-topo-selected",
         ]
+        if auto_tune:
+            cmd += ["--batch", str(batch_opt), "--bptt", str(bptt_opt)]
+        if strict_train:
+            cmd.append("--strict-tda")
         run(cmd)
         if yesno("Run fast eval on saved predictions?", default=True):
             for inst in instruments:
                 fast_eval_predictions(art, inst)
+        for inst in instruments:
+            _summary_banner(art, inst)
     if yesno("Train multi-horizon hybrid?", default=True):
         art = Path(prompt("Artifact root", default="./artifacts")).resolve()
         dev_default = "cuda" if _torch_cuda_available() else "cpu"
         device = prompt("Device [cpu/cuda]", default=dev_default)
         warm = maybe_ctmc_pretrain()
+        # Optional: quick topology search
+        use_topo = False
+        topo_art = Path("./artifacts/topo") / symbol
+        if yesno("Run quick topology search and reuse selected config?", default=True):
+            strict = yesno("Strict TDA for topology search?", default=False)
+            run(
+                [
+                    sys.executable,
+                    "-m",
+                    "torpedocode.cli.topo_search",
+                    "--cache-root",
+                    str(cache_root),
+                    "--instrument",
+                    symbol,
+                    "--label-key",
+                    "instability_s_5",
+                    "--artifact-dir",
+                    str(topo_art),
+                    *( ["--strict-tda"] if strict else [] ),
+                ]
+            )
+            if (topo_art / "topology_selected.json").exists():
+                use_topo = True
+        # Auto-tune bptt/batch from cache size
+        auto_tune = yesno("Auto-tune bptt/batch?", default=True)
+        bptt_opt = 64
+        batch_opt = 128
+        if auto_tune:
+            try:
+                import pandas as _pd
+                n0 = len(_pd.read_parquet(cache_root / f"{symbol}.parquet"))
+                T_train = max(1, int(0.6 * n0))
+                bptt_opt = int(max(8, min(64, max(1, T_train // 4))))
+                n_windows = max(0, T_train - bptt_opt + 1)
+                if n_windows <= 0:
+                    bptt_opt = max(1, min(16, T_train))
+                    n_windows = max(0, T_train - bptt_opt + 1)
+                batch_opt = int(max(8, min(128, n_windows if n_windows > 0 else 8)))
+            except Exception:
+                pass
+        # Strict TDA and progress during training
+        strict_train = yesno("Strict TDA during training?", default=False)
+        show_tda_prog = yesno("Show topology feature progress during training?", default=True)
+        if show_tda_prog:
+            os.environ["WIZARD_TOPO_PROGRESS"] = "1"
+        # Strict TDA and progress during training
+        strict_train = yesno("Strict TDA during training?", default=False)
+        show_tda_prog = yesno("Show topology feature progress during training?", default=True)
+        if show_tda_prog:
+            os.environ["WIZARD_TOPO_PROGRESS"] = "1"
         cmd = [
             sys.executable,
             "-m",
@@ -656,11 +975,20 @@ def option_crypto(cache_root: Path):
         ]
         if _topology_selected_exists(symbol, art):
             cmd.append("--use-topo-selected")
+        if use_topo:
+            cmd.append("--use-topo-selected")
+        if auto_tune:
+            cmd += ["--batch", str(batch_opt), "--bptt", str(bptt_opt)]
         if warm is not None:
             cmd += ["--warm-start", str(warm)]
+        if strict_train:
+            cmd.append("--strict-tda")
         run(cmd)
         if yesno("Run fast eval on saved predictions?", default=True):
             fast_eval_predictions(art, symbol)
+        if yesno("Pack artifacts into paper_bundle.zip?", default=True):
+            pack_artifacts(art)
+        _summary_banner(art, symbol)
 
 
 def option_lobster(cache_root: Path):
@@ -687,6 +1015,9 @@ def option_lobster(cache_root: Path):
         raw_dirs = [day_dir]
     symbol = prompt("Instrument symbol (e.g., AAPL)")
     tick = prompt("Tick size (e.g., 0.01)", default="0.01")
+    eta = float(
+        prompt("Instability threshold eta (abs mid change)", default="0.02") or "0.02"
+    )
     ca_csv = prompt("Corporate actions CSV (or blank)", default="").strip()
     ingest_cmd = [
         sys.executable,
@@ -700,6 +1031,8 @@ def option_lobster(cache_root: Path):
         symbol,
         "--tick-size",
         tick,
+        "--eta",
+        str(eta),
     ]
     if ca_csv:
         ingest_cmd += ["--actions-csv", ca_csv, "--apply-actions"]
@@ -711,6 +1044,7 @@ def option_lobster(cache_root: Path):
             prompt("Topology artifact dir", default=str(Path("./artifacts/topo") / symbol))
         ).resolve()
         label_key = prompt("Label key", default="instability_s_5")
+        strict = yesno("Strict TDA for topology search?", default=False)
         run(
             [
                 sys.executable,
@@ -724,6 +1058,7 @@ def option_lobster(cache_root: Path):
                 label_key,
                 "--artifact-dir",
                 str(topo_art),
+                *( ["--strict-tda"] if strict else [] ),
             ]
         )
     if yesno("Train multi-horizon hybrid?", default=True):
@@ -731,6 +1066,46 @@ def option_lobster(cache_root: Path):
         dev_default = "cuda" if _torch_cuda_available() else "cpu"
         device = prompt("Device [cpu/cuda]", default=dev_default)
         warm = maybe_ctmc_pretrain()
+        # Optional: quick topology search
+        use_topo = False
+        topo_art = Path("./artifacts/topo") / symbol
+        if yesno("Run quick topology search and reuse selected config?", default=True):
+            strict = yesno("Strict TDA for topology search?", default=False)
+            run(
+                [
+                    sys.executable,
+                    "-m",
+                    "torpedocode.cli.topo_search",
+                    "--cache-root",
+                    str(cache_root),
+                    "--instrument",
+                    symbol,
+                    "--label-key",
+                    "instability_s_5",
+                    "--artifact-dir",
+                    str(topo_art),
+                    *( ["--strict-tda"] if strict else [] ),
+                ]
+            )
+            if (topo_art / "topology_selected.json").exists():
+                use_topo = True
+        # Auto-tune bptt/batch from cache size
+        auto_tune = yesno("Auto-tune bptt/batch?", default=True)
+        bptt_opt = 64
+        batch_opt = 128
+        if auto_tune:
+            try:
+                import pandas as _pd
+                n0 = len(_pd.read_parquet(cache_root / f"{symbol}.parquet"))
+                T_train = max(1, int(0.6 * n0))
+                bptt_opt = int(max(8, min(64, max(1, T_train // 4))))
+                n_windows = max(0, T_train - bptt_opt + 1)
+                if n_windows <= 0:
+                    bptt_opt = max(1, min(16, T_train))
+                    n_windows = max(0, T_train - bptt_opt + 1)
+                batch_opt = int(max(8, min(128, n_windows if n_windows > 0 else 8)))
+            except Exception:
+                pass
         cmd = [
             sys.executable,
             "-m",
@@ -746,11 +1121,20 @@ def option_lobster(cache_root: Path):
         ]
         if _topology_selected_exists(symbol, art):
             cmd.append("--use-topo-selected")
+        if use_topo:
+            cmd.append("--use-topo-selected")
+        if auto_tune:
+            cmd += ["--batch", str(batch_opt), "--bptt", str(bptt_opt)]
         if warm is not None:
             cmd += ["--warm-start", str(warm)]
+        if strict_train:
+            cmd.append("--strict-tda")
         run(cmd)
         if yesno("Run fast eval on saved predictions?", default=True):
             fast_eval_predictions(art, symbol)
+        if yesno("Pack artifacts into paper_bundle.zip?", default=True):
+            pack_artifacts(art)
+        _summary_banner(art, symbol)
 
 
 def option_itch_ouch(cache_root: Path):
@@ -762,6 +1146,9 @@ def option_itch_ouch(cache_root: Path):
     raw_dir = Path(prompt("Directory containing .itch/.ouch files")).resolve()
     symbol = prompt("Instrument symbol (e.g., AAPL)")
     spec = prompt("Vendor spec (e.g., nasdaq-itch-5.0)", default="nasdaq-itch-5.0")
+    eta = float(
+        prompt("Instability threshold eta (abs mid change)", default="0.02") or "0.02"
+    )
     code = run(
         [
             sys.executable,
@@ -775,6 +1162,8 @@ def option_itch_ouch(cache_root: Path):
             symbol,
             "--itch-spec",
             spec,
+            "--eta",
+            str(eta),
         ]
     )
     if code != 0:
@@ -841,11 +1230,14 @@ def main():
     print("  6) Fast eval + DeLong where available")
     print("  7) Optional: Aggregate across instruments")
     print("Select data option:")
+    print("  0) Quick synthetic demo (no external data)")
     print("  1) Free crypto (Binance/Coinbase)")
     print("  2) LOBSTER CSVs (equities)")
     print("  3) ITCH/OUCH (equities; requires files)")
-    choice = prompt("Enter 1/2/3", default="1")
-    if choice == "1":
+    choice = prompt("Enter 0/1/2/3", default="0")
+    if choice == "0":
+        option_quick_demo(cache_root)
+    elif choice == "1":
         option_crypto(cache_root)
     elif choice == "2":
         option_lobster(cache_root)
@@ -894,6 +1286,8 @@ def main():
                 str(out),
             ]
         )
+        if yesno("Pack aggregated artifacts into paper_bundle.zip?", default=True):
+            pack_artifacts(art)
 
     # Optional: Cross-market LOMO protocol
     if yesno("Run cross-market LOMO protocol?", default=False):

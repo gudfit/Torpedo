@@ -44,6 +44,18 @@ def main():
     img_res = [32, 64, 128]
     img_bw = [0.02, 0.05]
 
+    # Progress bar if available
+    try:
+        from tqdm import tqdm  # type: ignore
+    except Exception:  # pragma: no cover
+        tqdm = None  # type: ignore
+
+    total = (
+        len(window_sizes) * (len(Ks) * len(l_res))  # landscapes
+        + len(window_sizes) * (len(img_res) * len(img_bw))  # images
+    )
+    bar = tqdm(total=total, desc="topo", leave=False) if tqdm is not None else None
+
     best = None
     best_cfg = None
     for ws in window_sizes:
@@ -72,6 +84,8 @@ def main():
                     score = m.auroc
                     if best is None or score > best:
                         best, best_cfg = score, topo
+                    if bar is not None:
+                        bar.update(1)
             else:
                 for res in img_res:
                     for bw in img_bw:
@@ -96,10 +110,14 @@ def main():
                         score = m.auroc
                         if best is None or score > best:
                             best, best_cfg = score, topo
+                        if bar is not None:
+                            bar.update(1)
 
     args.artifact_dir.mkdir(parents=True, exist_ok=True)
     with open(args.artifact_dir / "topology_selected.json", "w") as f:
         json.dump(asdict(best_cfg if best_cfg is not None else TopologyConfig()), f, indent=2)
+    if bar is not None:
+        bar.close()
     print(
         json.dumps(
             {
