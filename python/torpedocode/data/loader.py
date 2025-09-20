@@ -161,7 +161,10 @@ class LOBDatasetBuilder:
         count_windows = None
         if getattr(self.config, "count_windows_s", None) is not None:
             import pandas as _pd
-            count_windows = tuple(_pd.to_timedelta(int(s), unit="s") for s in self.config.count_windows_s)
+
+            count_windows = tuple(
+                _pd.to_timedelta(int(s), unit="s") for s in self.config.count_windows_s
+            )
         ewma_halflives = None
         if getattr(self.config, "ewma_halflives_s", None) is not None:
             ewma_halflives = tuple(float(x) for x in self.config.ewma_halflives_s)
@@ -304,11 +307,14 @@ class LOBDatasetBuilder:
             X_test = scaler.transform(X[test_idx])
             cfg = topology or TopologyConfig()
             topo_gen = TopologicalFeatureGenerator(cfg)
+
             def build(split: slice) -> Dict:
                 ts_split = rec["timestamps"][split]
                 X_scaled = scaler.transform(X[split])
                 use_raw = False
-                if cfg.complex_type == "cubical" and getattr(cfg, "use_raw_liquidity_surface", False):
+                if cfg.complex_type == "cubical" and getattr(
+                    cfg, "use_raw_liquidity_surface", False
+                ):
                     use_raw = True
                 if cfg.complex_type == "vietoris_rips" and getattr(cfg, "use_raw_for_vr", False):
                     use_raw = True
@@ -326,6 +332,7 @@ class LOBDatasetBuilder:
                 if rec["sizes"] is not None:
                     d["sizes"] = rec["sizes"][split].astype(np.float32)
                 return d
+
             train = build(train_idx)
             val = build(val_idx)
             test = build(test_idx)
@@ -335,12 +342,17 @@ class LOBDatasetBuilder:
                     ad.mkdir(parents=True, exist_ok=True)
                     from .. import __version__ as _version
                     import json
+
                     with open(ad / "split_indices.json", "w") as f:
-                        json.dump({
-                            "train_idx": list(range(0, v0)),
-                            "val_idx": list(range(v0, mid)),
-                            "test_idx": list(range(mid, t1)),
-                        }, f, indent=2)
+                        json.dump(
+                            {
+                                "train_idx": list(range(0, v0)),
+                                "val_idx": list(range(v0, mid)),
+                                "test_idx": list(range(mid, t1)),
+                            },
+                            f,
+                            indent=2,
+                        )
                 except Exception:
                     pass
             out.append((train, val, test, scaler))
@@ -374,18 +386,23 @@ class LOBDatasetBuilder:
         if (
             cfg.persistence_representation == "image"
             and bool(getattr(cfg, "image_auto_range", False))
-            and (getattr(cfg, "image_birth_range", None) is None or getattr(cfg, "image_pers_range", None) is None)
+            and (
+                getattr(cfg, "image_birth_range", None) is None
+                or getattr(cfg, "image_pers_range", None) is None
+            )
         ):
             _ = topo_gen.rolling_transform(rec["timestamps"][:t0], X_train, stride=topo_stride)
             b_rng = getattr(topo_gen, "_active_birth_range", None)
             p_rng = getattr(topo_gen, "_active_pers_range", None)
             if b_rng is not None and p_rng is not None:
                 base = asdict(cfg)
-                base.update({
-                    "image_auto_range": False,
-                    "image_birth_range": b_rng,
-                    "image_pers_range": p_rng,
-                })
+                base.update(
+                    {
+                        "image_auto_range": False,
+                        "image_birth_range": b_rng,
+                        "image_pers_range": p_rng,
+                    }
+                )
                 cfg = TopologyConfig(**base)
                 topo_gen = TopologicalFeatureGenerator(cfg)
 

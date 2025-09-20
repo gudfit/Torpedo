@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Dict, Iterable, Iterator
 
@@ -32,6 +33,7 @@ from ..evaluation.tpp import (
     model_and_empirical_frequencies,
     nll_per_event_from_arrays,
 )
+from ._windowing import resolve_row_slice
 
 
 def _window_batches(
@@ -55,11 +57,9 @@ def _window_batches(
     if bptt <= 0 or bptt > T:
         bptt = T
     ends = np.arange(bptt - 1, T)
-    # Fallback: ensure at least one window (last bptt slice) to avoid empty loader
     if ends.size == 0 and T > 0:
         ends = np.array([T - 1], dtype=int)
         bptt = min(T, max(1, bptt))
-    # Guard batch size
     if batch_size is None or int(batch_size) <= 0:
         batch_size = max(1, int(ends.size))
     y_end = y[ends]
@@ -184,8 +184,20 @@ def main():
     ap.add_argument("--pos-weight", type=float, default=None)
     ap.add_argument("--focal", action="store_true")
     ap.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
-    ap.add_argument("--count-windows-s", type=int, nargs="*", default=None, help="Event-type count windows in seconds (e.g., 1 5)")
-    ap.add_argument("--ewma-halflives-s", type=float, nargs="*", default=None, help="EWMA half-lives for event counts in seconds (e.g., 1.0 5.0)")
+    ap.add_argument(
+        "--count-windows-s",
+        type=int,
+        nargs="*",
+        default=None,
+        help="Event-type count windows in seconds (e.g., 1 5)",
+    )
+    ap.add_argument(
+        "--ewma-halflives-s",
+        type=float,
+        nargs="*",
+        default=None,
+        help="EWMA half-lives for event counts in seconds (e.g., 1.0 5.0)",
+    )
     ap.add_argument("--folds", type=int, default=1, help="Walk-forward folds (k-step)")
     ap.add_argument("--strict-tda", action="store_true", help="Fail if TDA backends missing")
     ap.add_argument(
@@ -199,8 +211,15 @@ def main():
         action="store_true",
         help="Load topology_selected.json from artifact-dir (or ./artifacts/topo/<instrument>/)",
     )
-    ap.add_argument("--pi-res", type=int, default=None, help="Persistence image resolution (e.g., 64, 128)")
-    ap.add_argument("--pi-sigma", type=float, default=None, help="Persistence image Gaussian bandwidth (e.g., 0.02, 0.05)")
+    ap.add_argument(
+        "--pi-res", type=int, default=None, help="Persistence image resolution (e.g., 64, 128)"
+    )
+    ap.add_argument(
+        "--pi-sigma",
+        type=float,
+        default=None,
+        help="Persistence image Gaussian bandwidth (e.g., 0.02, 0.05)",
+    )
     ap.add_argument(
         "--write-topology-schema",
         action="store_true",
@@ -272,6 +291,11 @@ def main():
         default=0,
         help="Number of strides to shift the window backward from the end",
     )
+    ap.add_argument(
+        "--full-history",
+        action="store_true",
+        help="Disable automatic sliding window capping; load the entire cache",
+    )
     args = ap.parse_args()
 
     data = DataConfig(
@@ -301,31 +325,35 @@ def main():
     builder = LOBDatasetBuilder(data)
     mdl = MarketDataLoader(data)
     row_slice: slice | None = None
-    if args.train_window_events is not None:
+    row_meta = None
+    if args.train_window_events is not None or not bool(args.full_history):
         try:
             total = mdl.row_count(args.instrument)
         except Exception as exc:
             raise SystemExit(f"Failed to read cached rows for {args.instrument}: {exc}")
-        window = max(1, int(args.train_window_events))
-        step = max(1, int(args.train_window_step) if args.train_window_step else window)
-        offset = max(0, int(args.train_window_offset))
-        stop = total - offset * step
-        if stop <= 0:
-            stop = min(total, window)
-        stop = min(total, stop)
-        start = max(0, stop - window)
-        if start >= stop:
-            start = max(0, stop - step)
-        row_slice = slice(start, stop)
-        print(
-            json.dumps(
-                {
-                    "instrument": args.instrument,
-                    "row_slice": [int(row_slice.start or 0), int(row_slice.stop or 0)],
-                    "events": int((row_slice.stop or 0) - (row_slice.start or 0)),
-                }
-            )
+        auto_env = os.environ.get("TORPEDOCODE_AUTO_WINDOW_EVENTS", "").strip()
+        auto_cap = None
+        if auto_env:
+            try:
+                auto_cap = int(auto_env)
+            except ValueError:
+                auto_cap = None
+        res = resolve_row_slice(
+            total_rows=total,
+            explicit_window=(
+                int(args.train_window_events) if args.train_window_events is not None else None
+            ),
+            step=(int(args.train_window_step) if args.train_window_step is not None else None),
+            offset=int(args.train_window_offset),
+            allow_auto=not bool(args.full_history),
+            auto_cap=auto_cap,
         )
+        row_slice = res.row_slice
+        row_meta = res.meta
+    if row_slice is not None and row_meta is not None:
+        info = {"instrument": args.instrument}
+        info.update(row_meta)
+        print(json.dumps(info))
     scaler_path = args.artifact_dir / "scaler_schema.json"
     feat_schema_path = args.artifact_dir / "feature_schema.json"
     topo_cfg = None
@@ -364,6 +392,7 @@ def main():
             pass
     else:
         import os as _os
+
         if _os.environ.get("PAPER_TORPEDO_STRICT_TDA", "0").lower() in {"1", "true"}:
             try:
                 topo_cfg.strict_tda = True  # type: ignore[attr-defined]
@@ -424,6 +453,7 @@ def main():
         scaler = SplitSafeStandardScaler.load_schema(str(scaler_path))
     try:
         from dataclasses import asdict
+
         if not feat_schema_path.exists():
             schema = {
                 "instrument": args.instrument,
@@ -462,7 +492,9 @@ def main():
         hidden_size=args.hidden,
         num_layers=args.layers,
         include_market_embedding=bool(args.include_market_embedding),
-        market_vocab_size=(int(args.market_vocab_size) if args.market_vocab_size is not None else None),
+        market_vocab_size=(
+            int(args.market_vocab_size) if args.market_vocab_size is not None else None
+        ),
     )
     model = HybridLOBModel(F, Z, num_event_types=int(num_event_types), config=cfg)
     if args.warm_start:
@@ -521,19 +553,21 @@ def main():
     for i, (train, val, test) in enumerate(datasets, start=1):
         fold_dir = args.artifact_dir if folds == 1 else (args.artifact_dir / f"fold_{i}")
         fold_dir.mkdir(parents=True, exist_ok=True)
-        # Robust batching: if train window count is tiny or all one class, avoid balanced sampling surprises
         T_train = int(len(train.get("labels", [])))
         bptt_eff = int(args.bptt)
         if bptt_eff > T_train:
             bptt_eff = T_train
         n_windows = max(0, T_train - bptt_eff + 1)
         train_labels = train.get("labels", np.array([], dtype=int))
-        y_end = train_labels[bptt_eff - 1 : bptt_eff - 1 + n_windows] if n_windows > 0 else np.array([], dtype=int)
+        y_end = (
+            train_labels[bptt_eff - 1 : bptt_eff - 1 + n_windows]
+            if n_windows > 0
+            else np.array([], dtype=int)
+        )
         unique = np.unique(y_end) if y_end.size else np.array([], dtype=int)
         train_balanced = True
         batch_eff = int(args.batch)
         if n_windows <= 0:
-            # Ensure we can produce at least one batch
             bptt_eff = max(1, min(T_train, 16))
             n_windows = max(0, T_train - bptt_eff + 1)
         if n_windows > 0 and batch_eff > n_windows:
@@ -578,7 +612,6 @@ def main():
                 comments="",
             )
 
-    # Optionally persist final model weights for exact reproducibility
     try:
         if args.save_state_dict is not None:
             path = Path(args.save_state_dict)
@@ -602,51 +635,60 @@ def main():
         pass
 
     if bool(args.tpp_diagnostics):
+        wrote = False
+        try:
+            _logits_te, lam_te = _predict_logits_and_intensities(
+                model, test["features"], test["topology"], device
+            )
+            et = test.get("event_type_ids")
+            dt = test.get("delta_t")
+            if et is not None and dt is not None:
+                _ = save_tpp_arrays_and_diagnostics(args.artifact_dir, lam_te, et, dt)
+                wrote = True
+        except Exception:
             wrote = False
+        if not wrote:
             try:
-                _logits_te, lam_te = _predict_logits_and_intensities(
-                    model, test["features"], test["topology"], device
-                )
+                import numpy as _np
+
                 et = test.get("event_type_ids")
                 dt = test.get("delta_t")
-                if et is not None and dt is not None:
-                    _ = save_tpp_arrays_and_diagnostics(args.artifact_dir, lam_te, et, dt)
-                    wrote = True
-            except Exception:
-                wrote = False
-            if not wrote:
-                try:
-                    import numpy as _np
-                    et = test.get("event_type_ids")
-                    dt = test.get("delta_t")
-                    Tn = len(test.get("labels", []))
-                    lam = _np.zeros((Tn, 0), dtype=_np.float32)
-                    if et is None:
-                        et = _np.zeros((Tn,), dtype=_np.int64)
-                    if dt is None:
-                        dt = _np.zeros((Tn,), dtype=_np.float32)
-                    _ = save_tpp_arrays_and_diagnostics(args.artifact_dir, lam, et, dt)
-                except Exception:
-                    pass
-            try:
-                arr_path = args.artifact_dir / "tpp_test_arrays.npz"
-                diag_path = args.artifact_dir / "tpp_test_diagnostics.json"
-                if not arr_path.exists() or not diag_path.exists():
-                    import numpy as _np, json as _json
-                    Tn = len(test.get("labels", []))
-                    lam = _np.zeros((Tn, 0), dtype=_np.float32)
-                    et = test.get("event_type_ids")
-                    dt = test.get("delta_t")
-                    if et is None:
-                        et = _np.zeros((Tn,), dtype=_np.int64)
-                    if dt is None:
-                        dt = _np.zeros((Tn,), dtype=_np.float32)
-                    args.artifact_dir.mkdir(parents=True, exist_ok=True)
-                    _np.savez_compressed(arr_path, intensities=lam, event_type_ids=et, delta_t=dt)
-                    with open(diag_path, "w") as f:
-                        _json.dump({"nll_per_event": float("nan"), "ks_p_value": float("nan"), "coverage_error": float("nan")}, f)
+                Tn = len(test.get("labels", []))
+                lam = _np.zeros((Tn, 0), dtype=_np.float32)
+                if et is None:
+                    et = _np.zeros((Tn,), dtype=_np.int64)
+                if dt is None:
+                    dt = _np.zeros((Tn,), dtype=_np.float32)
+                _ = save_tpp_arrays_and_diagnostics(args.artifact_dir, lam, et, dt)
             except Exception:
                 pass
+        try:
+            arr_path = args.artifact_dir / "tpp_test_arrays.npz"
+            diag_path = args.artifact_dir / "tpp_test_diagnostics.json"
+            if not arr_path.exists() or not diag_path.exists():
+                import numpy as _np, json as _json
+
+                Tn = len(test.get("labels", []))
+                lam = _np.zeros((Tn, 0), dtype=_np.float32)
+                et = test.get("event_type_ids")
+                dt = test.get("delta_t")
+                if et is None:
+                    et = _np.zeros((Tn,), dtype=_np.int64)
+                if dt is None:
+                    dt = _np.zeros((Tn,), dtype=_np.float32)
+                args.artifact_dir.mkdir(parents=True, exist_ok=True)
+                _np.savez_compressed(arr_path, intensities=lam, event_type_ids=et, delta_t=dt)
+                with open(diag_path, "w") as f:
+                    _json.dump(
+                        {
+                            "nll_per_event": float("nan"),
+                            "ks_p_value": float("nan"),
+                            "coverage_error": float("nan"),
+                        },
+                        f,
+                    )
+        except Exception:
+            pass
 
     try:
         write_tda_backends_json(args.artifact_dir / "tda_backends.json")

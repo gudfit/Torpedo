@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import List
 
@@ -24,6 +25,7 @@ from . import train as train_cli
 from ..evaluation.metrics import compute_classification_metrics, delong_ci_auroc
 from ..evaluation.helpers import write_tda_backends_json, save_tpp_arrays_and_diagnostics
 from dataclasses import asdict
+from ._windowing import resolve_row_slice, WindowResolution
 
 
 def _discover_instruments(cache_root: Path) -> List[str]:
@@ -159,6 +161,11 @@ def main():
         default=0,
         help="Number of strides to shift the window backward from the latest data",
     )
+    ap.add_argument(
+        "--full-history",
+        action="store_true",
+        help="Disable automatic windowing; always load the full cached history",
+    )
     args = ap.parse_args()
 
     try:
@@ -200,7 +207,11 @@ def main():
     mdl = MarketDataLoader(data)
     # Enable progress bars inside TrainingPipeline if requested
     import os as _os
-    if bool(args.progress) or _os.environ.get("WIZARD_TRAIN_PROGRESS", "0").lower() in {"1", "true"}:
+
+    if bool(args.progress) or _os.environ.get("WIZARD_TRAIN_PROGRESS", "0").lower() in {
+        "1",
+        "true",
+    }:
         _os.environ["TORPEDOCODE_PROGRESS"] = "1"
 
     import json as _json_topo
@@ -212,26 +223,31 @@ def main():
         except Exception:
             _topo_global = None
 
-    def _row_slice_for_inst(inst: str) -> slice | None:
-        if args.train_window_events is None:
-            return None
+    auto_env = os.environ.get("TORPEDOCODE_AUTO_WINDOW_EVENTS", "").strip()
+    _auto_cap = None
+    if auto_env:
+        try:
+            _auto_cap = int(auto_env)
+        except ValueError:
+            _auto_cap = None
+
+    def _row_slice_for_inst(inst: str) -> WindowResolution:
+        if args.train_window_events is None and bool(args.full_history):
+            return WindowResolution(row_slice=None, meta=None)
         try:
             total = mdl.row_count(inst)
         except Exception as exc:
             raise SystemExit(f"Failed to read cached rows for {inst}: {exc}")
-        if total <= 0:
-            return slice(0, 0)
-        window = max(1, int(args.train_window_events))
-        step = max(1, int(args.train_window_step) if args.train_window_step else window)
-        offset = max(0, int(args.train_window_offset))
-        stop = total - offset * step
-        if stop <= 0:
-            stop = min(total, window)
-        stop = min(total, stop)
-        start = max(0, stop - window)
-        if start >= stop:
-            start = max(0, stop - step)
-        return slice(start, stop)
+        return resolve_row_slice(
+            total_rows=total,
+            explicit_window=(
+                int(args.train_window_events) if args.train_window_events is not None else None
+            ),
+            step=(int(args.train_window_step) if args.train_window_step is not None else None),
+            offset=int(args.train_window_offset),
+            allow_auto=not bool(args.full_history),
+            auto_cap=_auto_cap,
+        )
 
     def _topo_for_inst(inst: str) -> TopologyConfig:
         import os as _os
@@ -510,18 +526,12 @@ def main():
         for inst in instruments:
             print(f"Training {inst}")
             for lbl in label_keys:
-                row_slice = _row_slice_for_inst(inst)
-                if row_slice is not None:
-                    print(
-                        json.dumps(
-                            {
-                                "instrument": inst,
-                                "label": lbl,
-                                "row_slice": [int(row_slice.start or 0), int(row_slice.stop or 0)],
-                                "events": int((row_slice.stop or 0) - (row_slice.start or 0)),
-                            }
-                        )
-                    )
+                row_info = _row_slice_for_inst(inst)
+                row_slice = row_info.row_slice
+                if row_info.meta:
+                    meta = {"instrument": inst, "label": lbl}
+                    meta.update(row_info.meta)
+                    print(json.dumps(meta))
                 ds = builder.build_splits(
                     inst,
                     label_key=lbl,
@@ -539,7 +549,11 @@ def main():
                                 "train_T": int(len(ds[0].get("labels", []))),
                                 "val_T": int(len(ds[1].get("labels", []))),
                                 "test_T": int(len(ds[2].get("labels", []))),
-                                "row_slice": None if row_slice is None else [row_slice.start, row_slice.stop],
+                                "row_slice": (
+                                    None
+                                    if row_slice is None
+                                    else [int(row_slice.start or 0), int(row_slice.stop or 0)]
+                                ),
                             }
                         )
                     except Exception:
@@ -569,8 +583,12 @@ def main():
             print(f"Training pooled for {lbl}")
             seqs = []
             for k, inst in enumerate(instruments):
-                row_slice = _row_slice_for_inst(inst)
-                rec = builder.build_sequence(inst, row_slice=row_slice)
+                row_info = _row_slice_for_inst(inst)
+                if row_info.meta:
+                    meta = {"instrument": inst, "label": lbl}
+                    meta.update(row_info.meta)
+                    print(json.dumps(meta))
+                rec = builder.build_sequence(inst, row_slice=row_info.row_slice)
                 T = len(rec["timestamps"])
                 t0 = int(0.6 * T)
                 v0 = int(0.8 * T)
@@ -641,8 +659,12 @@ def main():
                 topo = _topo_for_inst(inst)
                 seqs = []
                 for k, other in enumerate(instruments):
-                    row_slice = _row_slice_for_inst(other)
-                    rec = builder.build_sequence(other, row_slice=row_slice)
+                    row_info = _row_slice_for_inst(other)
+                    if row_info.meta:
+                        meta = {"instrument": other, "label": lbl, "holdout": inst}
+                        meta.update(row_info.meta)
+                        print(json.dumps(meta))
+                    rec = builder.build_sequence(other, row_slice=row_info.row_slice)
                     T = len(rec["timestamps"])
                     t0 = int(0.6 * T)
                     v0 = int(0.8 * T)
