@@ -2,8 +2,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <numeric>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -28,13 +30,9 @@ static Metrics compute_metrics(const std::vector<double> &pred,
   const size_t n = pred.size();
   // Single sort (desc) reused for AUROC, AUPRC, ECE to reduce overhead
   std::vector<size_t> o2(n);
-  for (size_t i = 0; i < n; ++i)
-    o2[i] = i;
+  std::iota(o2.begin(), o2.end(), size_t{0});
   std::sort(o2.begin(), o2.end(),
             [&](size_t a, size_t b) { return pred[a] > pred[b]; });
-  std::vector<int> y_sorted(n);
-  for (size_t i = 0; i < n; ++i)
-    y_sorted[i] = label[o2[i]];
   size_t n_pos = 0, n_neg = 0;
   for (auto y : label)
     (y ? n_pos : n_neg)++;
@@ -44,38 +42,39 @@ static Metrics compute_metrics(const std::vector<double> &pred,
     // sum(pos_desc_indices)
     double sum_pos_desc_idx = 0.0;
     for (size_t i = 0; i < n; ++i)
-      if (y_sorted[i] == 1)
+      if (label[o2[i]] == 1)
         sum_pos_desc_idx += double(i);
     double sum_ranks_pos_asc = double(n_pos) * double(n - 1) - sum_pos_desc_idx;
     auc = (sum_ranks_pos_asc - double(n_pos) * double(n_pos - 1) / 2.0) /
           (double(n_pos) * double(n_neg));
   }
   // AUPRC: either trapezoid (trap) or step-wise (sklearn-like)
-  std::vector<double> tp(n), fp(n);
-  for (size_t i = 0; i < n; ++i) {
-    tp[i] = (i ? tp[i - 1] : 0.0) + (y_sorted[i] == 1 ? 1.0 : 0.0);
-    fp[i] = (i ? fp[i - 1] : 0.0) + (y_sorted[i] == 0 ? 1.0 : 0.0);
-  }
-  double P = double(n_pos > 0 ? n_pos : 1);
-  std::vector<double> precision(n), recall(n);
-  for (size_t i = 0; i < n; ++i) {
-    double denom = (tp[i] + fp[i]);
-    precision[i] = denom > 0 ? tp[i] / denom : 0.0;
-    recall[i] = tp[i] / P;
-  }
+  const double P = double(n_pos > 0 ? n_pos : 1);
   double auprc = 0.0;
-  if (pr_step_mode) {
-    // Step-wise: sum (R_i - R_{i-1}) * precision_i (right-constant)
-    for (size_t i = 1; i < n; ++i) {
-      double dx = recall[i] - recall[i - 1];
-      if (dx > 0)
-        auprc += precision[i] * dx;
+  size_t tp = 0, fp = 0;
+  double prev_prec = 0.0, prev_rec = 0.0;
+  bool prev_valid = false;
+  for (size_t i = 0; i < n; ++i) {
+    int y = label[o2[i]];
+    if (y == 1)
+      ++tp;
+    else
+      ++fp;
+    double denom = double(tp + fp);
+    double prec = denom > 0 ? double(tp) / denom : 0.0;
+    double rec = double(tp) / P;
+    if (prev_valid) {
+      double dx = rec - prev_rec;
+      if (dx > 0) {
+        if (pr_step_mode)
+          auprc += prec * dx;
+        else
+          auprc += 0.5 * (prec + prev_prec) * dx;
+      }
     }
-  } else {
-    for (size_t i = 1; i < n; ++i) {
-      double dx = recall[i] - recall[i - 1];
-      auprc += 0.5 * (precision[i] + precision[i - 1]) * dx;
-    }
+    prev_prec = prec;
+    prev_rec = rec;
+    prev_valid = true;
   }
   // Brier (vectorized accumulation when possible)
   auto accumulate_range = [&](size_t start, size_t end) {
@@ -232,19 +231,33 @@ int main(int argc, char **argv) {
     if (line.empty())
       continue;
     if (fast_path) {
-      // Fast parse: use rfind to locate last two commas and parse substrings
-      size_t last = line.rfind(',');
-      if (last == std::string::npos) {
-        continue;
+      // Fast parse: locate commas and convert in-place via strtod/strtol
+      const char *data = line.c_str();
+      const char *end = data + line.size();
+      const char *pred_start = nullptr;
+      const char *label_start = nullptr;
+      int comma_seen = 0;
+      for (const char *ptr = data; ptr < end; ++ptr) {
+        if (*ptr == ',') {
+          ++comma_seen;
+          if (comma_seen == 1)
+            pred_start = ptr + 1;
+          else if (comma_seen == 2) {
+            label_start = ptr + 1;
+            break;
+          }
+        }
       }
-      size_t prev = (last > 0) ? line.rfind(',', last - 1) : std::string::npos;
-      if (prev == std::string::npos) {
+      if (!pred_start || !label_start)
         continue;
-      }
-      std::string pred_s = line.substr(prev + 1, last - (prev + 1));
-      std::string label_s = line.substr(last + 1);
-      double p = std::atof(pred_s.c_str());
-      int y = std::atoi(label_s.c_str());
+      char *pred_end = nullptr;
+      double p = std::strtod(pred_start, &pred_end);
+      if (pred_end == pred_start)
+        continue;
+      char *label_end = nullptr;
+      int y = int(std::strtol(label_start, &label_end, 10));
+      if (label_end == label_start)
+        continue;
       if (std::isfinite(p) && (y == 0 || y == 1)) {
         pred.push_back(p);
         label.push_back(y);
