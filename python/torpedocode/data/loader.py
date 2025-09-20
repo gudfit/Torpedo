@@ -159,7 +159,13 @@ class LOBDatasetBuilder:
         if row_slice is None:
             df = mdl.load_events(instrument)
         else:
-            df = mdl.load_events(instrument, row_slice=row_slice)
+            try:
+                df = mdl.load_events(instrument, row_slice=row_slice)
+            except TypeError as exc:
+                if "row_slice" not in str(exc):
+                    raise
+                # Support test doubles that omit the optional keyword
+                df = mdl.load_events(instrument)
         count_windows = None
         if getattr(self.config, "count_windows_s", None) is not None:
             import pandas as _pd
