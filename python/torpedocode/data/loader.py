@@ -157,7 +157,10 @@ class LOBDatasetBuilder:
         """Construct raw feature arrays and labels for one instrument."""
 
         mdl = MarketDataLoader(self.config)
-        df = mdl.load_events(instrument, row_slice=row_slice)
+        if row_slice is None:
+            df = mdl.load_events(instrument)
+        else:
+            df = mdl.load_events(instrument, row_slice=row_slice)
         count_windows = None
         if getattr(self.config, "count_windows_s", None) is not None:
             import pandas as _pd
