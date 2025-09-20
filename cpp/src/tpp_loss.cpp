@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <cmath>
-#include <numbers>
 
 #include "torpedocode/kernels.hpp"
 
@@ -8,6 +7,7 @@ namespace torpedocode {
 
 namespace {
 constexpr double kEps = 1e-12;
+constexpr double kPi = 3.141592653589793238462643383279502884; // C++17-safe
 
 torch::Tensor clamp_min_eps(const torch::Tensor &tensor) {
   return torch::clamp_min(tensor, kEps);
@@ -76,7 +76,7 @@ TPPLossOutputs tpp_loss(const TPPLossInputs &inputs) {
     auto denom = sigma + kEps;
     auto log_sizes = torch::log(sizes);
     auto z = (log_sizes - mu_evt) / denom;
-    const double half_log_two_pi = 0.5 * std::log(2.0 * std::numbers::pi);
+    const double half_log_two_pi = 0.5 * std::log(2.0 * kPi);
     auto constant = make_scalar(half_log_two_pi, intensities);
     auto term = 0.5 * z.pow(2) + log_sigma_evt + log_sizes + constant;
     mark_nll = (term * event_mask).sum(1);
