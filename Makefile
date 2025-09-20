@@ -31,6 +31,10 @@ smoke:
 paper-smoke:
 	$(PYTHON) scripts/paper_smoke.py
 
+.PHONY: paper-smoke-gpu
+paper-smoke-gpu:
+	$(PYTHON) scripts/paper_smoke.py --device cuda
+
 ci-regime-smoke-gpu:
 	$(PYTHON) scripts/paper_smoke.py --device cuda
 	@set -e; \

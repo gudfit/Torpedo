@@ -186,10 +186,19 @@ def main():
         action="store_true",
         help="Force install Rust toolchain (cargo) if missing",
     )
+    # Install pyarrow by default; allow opting out
     ap.add_argument(
         "--pyarrow",
+        dest="pyarrow",
         action="store_true",
-        help="Install pyarrow for parquet support and paper smoke scripts",
+        default=True,
+        help="Install pyarrow for parquet support (default: on)",
+    )
+    ap.add_argument(
+        "--no-pyarrow",
+        dest="pyarrow",
+        action="store_false",
+        help="Skip installing pyarrow",
     )
     ap.add_argument(
         "--cuda-arch",
@@ -219,7 +228,7 @@ def main():
     setup(
         args.env_dir.resolve(),
         dev=bool(args.dev),
-        cuda=False if cuda_policy is False else bool(cuda_policy),  # placeholder; may auto-switch later
+        cuda=cuda_policy,  # allow None to trigger auto-detection
         rust=(True if args.rust else (not bool(args.no_rust))),
         install_pyarrow=bool(args.pyarrow),
         cuda_arch=args.cuda_arch,
