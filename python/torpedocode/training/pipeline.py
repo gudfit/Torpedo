@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Dict, Iterable, Optional
 
 import numpy as np
@@ -66,11 +67,36 @@ class TrainingPipeline:
         except Exception:
             pass
 
+        # Optional progress bars via tqdm if available and enabled by env
+        _use_bar = str(os.environ.get("TORPEDOCODE_PROGRESS", "0")).lower() in {"1", "true"}
+        _tqdm = None
+        if _use_bar:
+            try:
+                from tqdm import tqdm as _tqdm  # type: ignore
+            except Exception:
+                _tqdm = None
+
         state = TrainingState()
+        epoch_bar = None
+        if _tqdm is not None:
+            epoch_bar = _tqdm(total=int(self.config.training.max_epochs), desc="train", leave=False)
+
         while state.epoch < self.config.training.max_epochs:
             self.model.train()
             last_loss = None
-            for batch in train_loader:
+            loader = train_loader
+            batch_bar = None
+            if _tqdm is not None:
+                try:
+                    total_batches = len(loader)  # type: ignore[arg-type]
+                except Exception:
+                    total_batches = None
+                batch_bar = _tqdm(total=total_batches, desc=f"e{state.epoch+1}", leave=False)
+                try:
+                    loader = iter(loader)
+                except Exception:
+                    pass
+            for batch in (loader if _tqdm is None else iter(train_loader)):
                 batch = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in batch.items()}
                 if self.config.training.bptt_steps and batch["features"].ndim == 3:
                     T = batch["features"].shape[1]
@@ -114,6 +140,11 @@ class TrainingPipeline:
                     )
                     optimizer.step()
                 last_loss = loss_outputs
+                if batch_bar is not None:
+                    try:
+                        batch_bar.update(1)
+                    except Exception:
+                        pass
             if last_loss is None:
                 # Be tolerant in tiny/demo or edge splits: allow training to proceed
                 # without batches so downstream steps (eval/predictions) can run.
@@ -128,6 +159,11 @@ class TrainingPipeline:
                 metrics.update(self.evaluate(val_loader, device))
 
             state.epoch += 1
+            if epoch_bar is not None:
+                try:
+                    epoch_bar.update(1)
+                except Exception:
+                    pass
 
             if val_loader is None:
                 continue
@@ -140,6 +176,11 @@ class TrainingPipeline:
                 if state.patience_counter >= self.config.training.patience:
                     break
 
+        if epoch_bar is not None:
+            try:
+                epoch_bar.close()
+            except Exception:
+                pass
         return metrics
 
     @torch.no_grad()

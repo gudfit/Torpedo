@@ -131,6 +131,16 @@ def main():
         action="store_true",
         help="Include learned market embedding in per_instrument mode as well",
     )
+    ap.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show tqdm progress bars during training",
+    )
+    ap.add_argument(
+        "--log-splits",
+        action="store_true",
+        help="Print split sizes before training",
+    )
     args = ap.parse_args()
 
     try:
@@ -169,6 +179,10 @@ def main():
         expand_event_types_by_level=bool(args.expand_types_by_level),
     )
     builder = LOBDatasetBuilder(data)
+    # Enable progress bars inside TrainingPipeline if requested
+    import os as _os
+    if bool(args.progress) or _os.environ.get("WIZARD_TRAIN_PROGRESS", "0").lower() in {"1", "true"}:
+        _os.environ["TORPEDOCODE_PROGRESS"] = "1"
 
     import json as _json_topo
 
@@ -463,6 +477,19 @@ def main():
                     topo_stride=args.topo_stride,
                     artifact_dir=args.artifact_root / inst / lbl,
                 )
+                if bool(args.log_splits):
+                    try:
+                        print(
+                            {
+                                "instrument": inst,
+                                "label": lbl,
+                                "train_T": int(len(ds[0].get("labels", []))),
+                                "val_T": int(len(ds[1].get("labels", []))),
+                                "test_T": int(len(ds[2].get("labels", []))),
+                            }
+                        )
+                    except Exception:
+                        pass
                 if args.include_market_embedding:
                     for s in ds[:3]:
                         s["market_ids"] = np.zeros((len(s["labels"]),), dtype=np.int64)

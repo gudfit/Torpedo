@@ -81,6 +81,12 @@ def run(cmd: list[str]) -> int:
 
     return subprocess.call(cmd)
 
+def _has_predictions(artifact_root: Path, instrument: str) -> bool:
+    import glob as _glob
+    pattern = str(Path(artifact_root) / instrument / "*" / "predictions_test.csv")
+    files = _glob.glob(pattern)
+    return len(files) > 0
+
 
 def env_check():
     print("\n[Environment Check]")
@@ -955,11 +961,7 @@ def option_crypto(cache_root: Path):
         show_tda_prog = yesno("Show topology feature progress during training?", default=True)
         if show_tda_prog:
             os.environ["WIZARD_TOPO_PROGRESS"] = "1"
-        # Strict TDA and progress during training
-        strict_train = yesno("Strict TDA during training?", default=False)
-        show_tda_prog = yesno("Show topology feature progress during training?", default=True)
-        if show_tda_prog:
-            os.environ["WIZARD_TOPO_PROGRESS"] = "1"
+            os.environ["WIZARD_TRAIN_PROGRESS"] = "1"
         cmd = [
             sys.executable,
             "-m",
@@ -983,10 +985,32 @@ def option_crypto(cache_root: Path):
             cmd += ["--warm-start", str(warm)]
         if strict_train:
             cmd.append("--strict-tda")
+        if show_tda_prog:
+            cmd.append("--progress")
         run(cmd)
         if yesno("Run fast eval on saved predictions?", default=True):
             fast_eval_predictions(art, symbol)
-        if yesno("Pack artifacts into paper_bundle.zip?", default=True):
+        # Ensure predictions exist; if not, offer to rerun with more epochs
+        if not _has_predictions(art, symbol):
+            print(f"[note] No predictions found under {art / symbol}.")
+            if yesno("Rerun training with more epochs?", default=True):
+                more = int(prompt("Epochs", default="5") or "5")
+                cmd = [
+                    sys.executable,
+                    "-m",
+                    "torpedocode.cli.train_multi",
+                    "--cache-root",
+                    str(cache_root),
+                    "--artifact-root",
+                    str(art),
+                    "--epochs",
+                    str(more),
+                    "--device",
+                    device,
+                    "--use-topo-selected",
+                ]
+                run(cmd)
+        if _has_predictions(art, symbol) and yesno("Pack artifacts into paper_bundle.zip?", default=True):
             pack_artifacts(art)
         _summary_banner(art, symbol)
 

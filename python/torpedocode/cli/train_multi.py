@@ -36,6 +36,8 @@ def main():
     ap.add_argument("--include-market-embedding", action="store_true")
     ap.add_argument("--topology-json", type=Path, default=None)
     ap.add_argument("--use-topo-selected", action="store_true")
+    ap.add_argument("--progress", action="store_true")
+    ap.add_argument("--log-splits", action="store_true")
     ap.add_argument("--warm-start", type=Path, default=None, help="Checkpoint to warm-start all runs")
     args = ap.parse_args()
 
@@ -72,6 +74,10 @@ def main():
         "--beta",
         str(float(args.beta)),
     ]
+    if args.progress:
+        argv.append("--progress")
+    if args.log_splits:
+        argv.append("--log-splits")
     if args.topology_json is not None:
         argv += ["--topology-json", str(args.topology_json)]
     if args.use_topo_selected:
