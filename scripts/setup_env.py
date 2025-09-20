@@ -89,6 +89,7 @@ def setup(
     cuda: bool | None,
     rust: bool = True,
     install_pyarrow: bool = False,
+    install_tda: bool = False,
     cuda_arch: str | None = None,
 ) -> None:
     env_dir.mkdir(parents=True, exist_ok=True)
@@ -148,6 +149,14 @@ def setup(
         else:
             sh([py, "-m", "pip", "install", "pyarrow"])
 
+    # Optional: install TDA extras (ripser, persim, gudhi)
+    if install_tda:
+        tda_pkgs = ["ripser", "persim", "gudhi"]
+        if uv_bin:
+            sh([uv_bin, "pip", "install", "--python", py, *tda_pkgs])
+        else:
+            sh([py, "-m", "pip", "install", *tda_pkgs])
+
     # Sanity checks: try importing native modules
     try:
         out = subprocess.check_output([py, "-c", "import torpedocode_ingest; print('torpedocode_ingest OK')"], text=True).strip()
@@ -206,6 +215,13 @@ def main():
         default=None,
         help="Optional TORCH_CUDA_ARCH_LIST value (e.g., '90' or '89;90')",
     )
+    ap.add_argument(
+        "--tda",
+        dest="tda",
+        action="store_true",
+        default=False,
+        help="Install TDA extras (ripser, persim, gudhi)",
+    )
     args = ap.parse_args()
 
     if args.apt:
@@ -231,6 +247,7 @@ def main():
         cuda=cuda_policy,  # allow None to trigger auto-detection
         rust=(True if args.rust else (not bool(args.no_rust))),
         install_pyarrow=bool(args.pyarrow),
+        install_tda=bool(args.tda),
         cuda_arch=args.cuda_arch,
     )
 
