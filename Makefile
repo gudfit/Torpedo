@@ -6,21 +6,21 @@ test:
 	. .venv/bin/activate && pytest -q
 
 test-uv:
-	UV_CACHE_DIR=.tmp/uv uv run -q pytest -q
+	UV_CACHE_DIR=.tmp/uv UV_PYTHON=.venv/bin/python uv run --python .venv/bin/python -q pytest -q
 
 .PHONY: test-uv-perf
 test-uv-perf:
-	UV_CACHE_DIR=.tmp/uv bash scripts/run_tests_uv.sh --perf
+	UV_CACHE_DIR=.tmp/uv UV_PYTHON=.venv/bin/python bash scripts/run_tests_uv.sh --perf
 
 .PHONY: test-uv-cpu
 test-uv-cpu:
-	UV_CACHE_DIR=.tmp/uv bash scripts/run_tests_cpu.sh
+	UV_CACHE_DIR=.tmp/uv UV_PYTHON=.venv/bin/python bash scripts/run_tests_cpu.sh
 
 .PHONY: build-native
 build-native:
-	UV_CACHE_DIR=.tmp/uv uv run -q python scripts/build_native.py rust --verbose || true
-	UV_CACHE_DIR=.tmp/uv uv run -q python scripts/build_native.py lobster --verbose || true
-	UV_CACHE_DIR=.tmp/uv uv run -q python scripts/build_native.py panel --verbose || true
+	UV_CACHE_DIR=.tmp/uv UV_PYTHON=.venv/bin/python uv run --python .venv/bin/python -q python scripts/build_native.py rust --verbose || true
+	UV_CACHE_DIR=.tmp/uv UV_PYTHON=.venv/bin/python uv run --python .venv/bin/python -q python scripts/build_native.py lobster --verbose || true
+	UV_CACHE_DIR=.tmp/uv UV_PYTHON=.venv/bin/python uv run --python .venv/bin/python -q python scripts/build_native.py panel --verbose || true
 
 .PHONY: ci-cpu
 ci-cpu: build-native test-uv-cpu
@@ -61,7 +61,7 @@ ci-regime-smoke: paper-smoke
 
 .PHONY: wizard-deps
 wizard-deps:
-	UV_CACHE_DIR=.tmp/uv uv pip install tqdm
+	UV_CACHE_DIR=.tmp/uv uv pip install --python .venv/bin/python tqdm
 
 .PHONY: paper-pack
 paper-pack:

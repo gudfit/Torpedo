@@ -5,3 +5,5 @@ export PAPER_TORPEDO_STRICT_TDA=0
 # Target RTX 3090 (SM 86) for faster CUDA extension builds
 export TORCH_CUDA_ARCH_LIST=8.6
 export OMP_NUM_THREADS=1
+# Force uv to use this project's venv
+export UV_PYTHON="/home/crow/OtherNotes/TorpedoPaper/TorpedoCode/.venv/bin/python"
