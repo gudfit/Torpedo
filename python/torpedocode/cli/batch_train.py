@@ -205,7 +205,6 @@ def main():
     )
     builder = LOBDatasetBuilder(data)
     mdl = MarketDataLoader(data)
-    # Enable progress bars inside TrainingPipeline if requested
     import os as _os
 
     if bool(args.progress) or _os.environ.get("WIZARD_TRAIN_PROGRESS", "0").lower() in {
@@ -470,7 +469,6 @@ def main():
         with open(art / "eval_test.json", "w") as f:
             _json.dump(out, f, indent=2)
 
-        # Persist meta (beta, seed, temperature)
         try:
             meta = {"beta": float(args.beta), "seed": int(args.seed)}
             if Tcal is not None:

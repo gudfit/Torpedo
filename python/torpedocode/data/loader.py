@@ -91,7 +91,6 @@ class MarketDataLoader:
         stop = max(0, min(stop, total))
 
         if stop <= start or total == 0:
-            # Return empty frame with the correct schema
             try:
                 empty = pf.schema.empty_table()
             except AttributeError:  # pragma: no cover - older pyarrow
@@ -157,7 +156,10 @@ class LOBDatasetBuilder:
         """Construct raw feature arrays and labels for one instrument."""
 
         mdl = MarketDataLoader(self.config)
-        df = mdl.load_events(instrument, row_slice=row_slice)
+        if row_slice is None:
+            df = mdl.load_events(instrument)
+        else:
+            df = mdl.load_events(instrument, row_slice=row_slice)
         count_windows = None
         if getattr(self.config, "count_windows_s", None) is not None:
             import pandas as _pd
@@ -287,7 +289,6 @@ class LOBDatasetBuilder:
         rec = self.build_sequence(instrument, row_slice=row_slice)
         T = len(rec["timestamps"])
         k = max(1, int(folds))
-        # Partition the last 40% into k segments; training grows cumulatively from 0 to each segment start
         base = int(0.6 * T)
         tail = T - base
         seg = max(1, tail // k)

@@ -78,16 +78,7 @@ static Metrics compute_metrics(const std::vector<double> &pred,
     }
   }
   // Brier (vectorized accumulation when possible)
-  double brier = 0.0;
-#ifdef _OPENMP
-  // Parallelize Brier accumulation across threads; each thread uses AVX2 when
-  // available
-#pragma omp parallel
-  {
-    size_t T = (size_t)omp_get_num_threads();
-    size_t t = (size_t)omp_get_thread_num();
-    size_t start = (n * t) / T;
-    size_t end = (n * (t + 1)) / T;
+  auto accumulate_range = [&](size_t start, size_t end) {
     double local = 0.0;
 #if defined(__AVX2__)
     size_t i = start;
@@ -113,36 +104,28 @@ static Metrics compute_metrics(const std::vector<double> &pred,
       local += d * d;
     }
 #endif
+    return local;
+  };
+
+  double brier = 0.0;
+#ifdef _OPENMP
+  int max_threads = omp_get_max_threads();
+  if (max_threads > 1) {
+#pragma omp parallel
+    {
+      size_t T = (size_t)omp_get_num_threads();
+      size_t t = (size_t)omp_get_thread_num();
+      size_t start = (n * t) / T;
+      size_t end = (n * (t + 1)) / T;
+      double local = accumulate_range(start, end);
 #pragma omp atomic
-    brier += local;
+      brier += local;
+    }
+  } else {
+    brier = accumulate_range(0, n);
   }
 #else
-#if defined(__AVX2__)
-  {
-    size_t i = 0;
-    __m256d acc = _mm256_setzero_pd();
-    for (; i + 4 <= n; i += 4) {
-      __m256d p =
-          _mm256_set_pd(pred[i + 3], pred[i + 2], pred[i + 1], pred[i + 0]);
-      __m256d yv = _mm256_set_pd((double)label[i + 3], (double)label[i + 2],
-                                 (double)label[i + 1], (double)label[i + 0]);
-      __m256d d = _mm256_sub_pd(p, yv);
-      acc = _mm256_fmadd_pd(d, d, acc);
-    }
-    alignas(32) double tmp[4];
-    _mm256_store_pd(tmp, acc);
-    brier = tmp[0] + tmp[1] + tmp[2] + tmp[3];
-    for (; i < n; ++i) {
-      double d = pred[i] - label[i];
-      brier += d * d;
-    }
-  }
-#else
-  for (size_t i = 0; i < n; ++i) {
-    double d = pred[i] - label[i];
-    brier += d * d;
-  }
-#endif
+  brier = accumulate_range(0, n);
 #endif
   brier /= (n > 0 ? n : 1);
   // ECE with 15 equal-frequency bins (reuse desc order; direction doesn't
@@ -204,10 +187,8 @@ int main(int argc, char **argv) {
   }
 #ifdef _OPENMP
   if (threads > 0) {
-    omp_set_num_threads(threads);
-  } else {
-    // Avoid OpenMP overhead by default unless explicitly requested
-    omp_set_num_threads(1);
+    omp_set_num_threads(std::max(1, threads));
+    omp_set_dynamic(0);
   }
 #endif
   if (argc - argi < 2) {

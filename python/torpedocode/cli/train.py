@@ -364,7 +364,6 @@ def main():
         except Exception:
             topo_cfg = TopologyConfig()
 
-    # Allow strict TDA toggle on config
     if topo_cfg is None:
         topo_cfg = TopologyConfig()
     if args.topology_json is not None and Path(args.topology_json).exists():
