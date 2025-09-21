@@ -10,6 +10,8 @@ add_library(torpedocode_kernels SHARED
     src/extension.cpp
     src/tpp_loss.cpp
     src/lob_kernels.cu
+    src/tda.cpp
+    src/tda_kernels.cu
 )
 
 target_include_directories(torpedocode_kernels

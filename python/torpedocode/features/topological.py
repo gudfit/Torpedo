@@ -8,10 +8,10 @@ landscapes and images as specified in :class:`TopologyConfig`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 import warnings
 import json
-from typing import Optional, Tuple, Iterable, List
+from typing import Optional, Tuple, Iterable, List, Any, Dict
 
 import numpy as np
 
@@ -22,6 +22,48 @@ try:  # pragma: no cover - optional
 except Exception:  # pragma: no cover
     _tda_native = None
 
+try:  # pragma: no cover - optional
+    import torch
+except Exception:  # pragma: no cover
+    torch = None  # type: ignore[assignment]
+
+
+_CUDA_KERNELS: Any = None
+_CUDA_ERROR: Optional[str] = None
+_SESSION_BACKENDS: set[str] = set()
+
+
+def _get_cuda_extension() -> Optional[Any]:
+    """Lazily compile/load the CUDA extension if available."""
+
+    global _CUDA_KERNELS, _CUDA_ERROR
+    if _CUDA_KERNELS is False:
+        return None
+    if _CUDA_KERNELS is not None:
+        return _CUDA_KERNELS
+    if torch is None:
+        _CUDA_ERROR = "torch not available"
+        _CUDA_KERNELS = False
+        return None
+    if not torch.cuda.is_available():
+        _CUDA_ERROR = "torch.cuda.is_available() == False"
+        _CUDA_KERNELS = False
+        return None
+    try:
+        from ..cuda import load_extension as _load_extension
+    except Exception as exc:  # pragma: no cover - optional path
+        _CUDA_ERROR = str(exc)
+        _CUDA_KERNELS = False
+        return None
+    try:
+        _CUDA_KERNELS = _load_extension(name="torpedocode_kernels")
+    except Exception as exc:  # pragma: no cover - build failures are environment-specific
+        _CUDA_ERROR = str(exc)
+        _CUDA_KERNELS = False
+        return None
+    _CUDA_ERROR = None
+    return _CUDA_KERNELS
+
 
 @dataclass(slots=True)
 class TopologicalFeatureGenerator:
@@ -30,6 +72,84 @@ class TopologicalFeatureGenerator:
     config: TopologyConfig
     _active_birth_range: Optional[Tuple[float, float]] = None
     _active_pers_range: Optional[Tuple[float, float]] = None
+    _backend_history: List[str] = field(default_factory=list)
+
+    def _note_backend(self, name: str) -> None:
+        if name not in self._backend_history:
+            self._backend_history.append(name)
+        _SESSION_BACKENDS.add(name)
+
+    @property
+    def backends_used(self) -> Tuple[str, ...]:
+        """Return the distinct backends exercised by this generator."""
+
+        return tuple(self._backend_history)
+
+
+def topology_backend_status(*, probe_cuda: bool = False) -> Dict[str, Dict[str, Any]]:
+    """Return a summary of native/CUDA backend availability for reporting."""
+
+    status: Dict[str, Dict[str, Any]] = {}
+    native: Dict[str, Any] = {"available": _tda_native is not None, "version": None}
+    if _tda_native is not None:
+        version = getattr(_tda_native, "__version__", None)
+        native["version"] = str(version) if version is not None else None
+    status["native_module"] = native
+
+    cuda_info: Dict[str, Any] = {
+        "cuda_visible": False,
+        "device_count": None,
+        "torch_cuda_version": None,
+        "compiled": False,
+        "op_registered": False,
+        "probed": False,
+        "error": None,
+        "session_backends": sorted(_SESSION_BACKENDS),
+    }
+
+    if torch is None:
+        cuda_info["error"] = _CUDA_ERROR or "torch not available"
+    else:
+        try:
+            cuda_info["torch_cuda_version"] = getattr(torch.version, "cuda", None)
+        except Exception:  # pragma: no cover - torch without version metadata
+            cuda_info["torch_cuda_version"] = None
+        try:
+            device_count = torch.cuda.device_count()
+        except Exception:  # pragma: no cover - CUDA context issues
+            device_count = None
+        if device_count is not None:
+            try:
+                cuda_info["device_count"] = int(device_count)
+            except Exception:
+                cuda_info["device_count"] = None
+        try:
+            has_cuda = bool(torch.cuda.is_available())
+        except Exception:
+            has_cuda = False
+        if has_cuda:
+            cuda_info["cuda_visible"] = True
+            had_kernel = _CUDA_KERNELS not in (None, False)
+            kernels: Optional[Any]
+            if probe_cuda and not had_kernel:
+                kernels = _get_cuda_extension()
+                had_kernel = kernels not in (None, False)
+            else:
+                kernels = _CUDA_KERNELS if had_kernel else None
+            cuda_info["compiled"] = bool(had_kernel)
+            cuda_info["probed"] = bool(probe_cuda or had_kernel)
+            if had_kernel:
+                ops = getattr(torch.ops, "torpedocode", None)
+                cuda_info["op_registered"] = bool(ops is not None and hasattr(ops, "tda_rolling"))
+                cuda_info["error"] = None
+            else:
+                cuda_info["error"] = _CUDA_ERROR
+        else:
+            cuda_info["probed"] = bool(probe_cuda)
+            cuda_info["error"] = _CUDA_ERROR or "torch.cuda.is_available() == False"
+    status["torch_cuda_extension"] = cuda_info
+    status["session_backends"] = {"used": sorted(_SESSION_BACKENDS)}
+    return status
 
     def transform(self, tensor: np.ndarray) -> np.ndarray:
         """Convert liquidity windows into vectorised persistence summaries."""
@@ -50,6 +170,7 @@ class TopologicalFeatureGenerator:
                     raise
                 rep = np.zeros((embedding_dim,), dtype=np.float32)
             reps.append(rep)
+        self._note_backend("python")
         return np.stack(reps, axis=0).astype(np.float32)
 
     def rolling_transform(
@@ -89,12 +210,13 @@ class TopologicalFeatureGenerator:
             list(window_sizes_s) if window_sizes_s is not None else list(self.config.window_sizes_s)
         )
 
+        cfg_json = json.dumps(asdict(self.config))
+
         if (
             _tda_native is not None
             and hasattr(_tda_native, "rolling_topo")
             and self.config.complex_type == "vietoris_rips"
         ):
-            cfg_json = json.dumps(asdict(self.config))
             arr = np.asarray(series, dtype=np.float64, order="C")
             ts_arr = ts_ns.astype(np.int64, copy=False)
             errors: List[BaseException] = []
@@ -116,6 +238,7 @@ class TopologicalFeatureGenerator:
                             int(stride),
                             cfg_json,
                         )
+                    self._note_backend("rust_native")
                     return np.asarray(out, dtype=np.float32)
                 except Exception as e:  # record and try alternate signature
                     errors.append(e)
@@ -126,6 +249,40 @@ class TopologicalFeatureGenerator:
                 if self._strict() and not only_sig:
                     raise errors[-1]
                 # else fall back to Python implementation below
+        cuda_kernels = _get_cuda_extension() if torch is not None else None
+        if cuda_kernels is not None:
+            try:
+                device = torch.device("cuda")
+                arr32 = np.asarray(series, dtype=np.float32, order="C")
+                series_tensor = torch.from_numpy(arr32).to(device=device)
+                ts_tensor = torch.as_tensor(
+                    ts_ns.astype(np.int64, copy=False),
+                    dtype=torch.int64,
+                    device=device,
+                )
+                window_tensor = torch.tensor(
+                    [int(w) for w in wlist], dtype=torch.int64, device=device
+                )
+                topo_tensor = torch.ops.torpedocode.tda_rolling(
+                    series_tensor,
+                    ts_tensor,
+                    window_tensor,
+                    int(stride),
+                    int(embedding_dim),
+                    cfg_json,
+                )
+                self._note_backend("torch_cuda_extension")
+                return (
+                    topo_tensor.detach()
+                    .to("cpu")
+                    .contiguous()
+                    .to(dtype=torch.float32)
+                    .numpy()
+                )
+            except Exception:
+                if self._strict():
+                    raise
+                # fall back to Python implementation below
         reps_all = []
         show_prog = False
         bar = None
@@ -236,6 +393,7 @@ class TopologicalFeatureGenerator:
                 bar.close()
             except Exception:
                 pass
+        self._note_backend("python")
         return np.concatenate(reps_all, axis=1).astype(np.float32)
 
     def _embedding_dim(self) -> int:
@@ -716,4 +874,4 @@ class TopologicalFeatureGenerator:
         return bool(getattr(self.config, "strict_tda", False)) or env
 
 
-__all__ = ["TopologicalFeatureGenerator"]
+__all__ = ["TopologicalFeatureGenerator", "topology_backend_status"]
