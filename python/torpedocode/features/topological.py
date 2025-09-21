@@ -85,72 +85,6 @@ class TopologicalFeatureGenerator:
 
         return tuple(self._backend_history)
 
-
-def topology_backend_status(*, probe_cuda: bool = False) -> Dict[str, Dict[str, Any]]:
-    """Return a summary of native/CUDA backend availability for reporting."""
-
-    status: Dict[str, Dict[str, Any]] = {}
-    native: Dict[str, Any] = {"available": _tda_native is not None, "version": None}
-    if _tda_native is not None:
-        version = getattr(_tda_native, "__version__", None)
-        native["version"] = str(version) if version is not None else None
-    status["native_module"] = native
-
-    cuda_info: Dict[str, Any] = {
-        "cuda_visible": False,
-        "device_count": None,
-        "torch_cuda_version": None,
-        "compiled": False,
-        "op_registered": False,
-        "probed": False,
-        "error": None,
-        "session_backends": sorted(_SESSION_BACKENDS),
-    }
-
-    if torch is None:
-        cuda_info["error"] = _CUDA_ERROR or "torch not available"
-    else:
-        try:
-            cuda_info["torch_cuda_version"] = getattr(torch.version, "cuda", None)
-        except Exception:  # pragma: no cover - torch without version metadata
-            cuda_info["torch_cuda_version"] = None
-        try:
-            device_count = torch.cuda.device_count()
-        except Exception:  # pragma: no cover - CUDA context issues
-            device_count = None
-        if device_count is not None:
-            try:
-                cuda_info["device_count"] = int(device_count)
-            except Exception:
-                cuda_info["device_count"] = None
-        try:
-            has_cuda = bool(torch.cuda.is_available())
-        except Exception:
-            has_cuda = False
-        if has_cuda:
-            cuda_info["cuda_visible"] = True
-            had_kernel = _CUDA_KERNELS not in (None, False)
-            kernels: Optional[Any]
-            if probe_cuda and not had_kernel:
-                kernels = _get_cuda_extension()
-                had_kernel = kernels not in (None, False)
-            else:
-                kernels = _CUDA_KERNELS if had_kernel else None
-            cuda_info["compiled"] = bool(had_kernel)
-            cuda_info["probed"] = bool(probe_cuda or had_kernel)
-            if had_kernel:
-                ops = getattr(torch.ops, "torpedocode", None)
-                cuda_info["op_registered"] = bool(ops is not None and hasattr(ops, "tda_rolling"))
-                cuda_info["error"] = None
-            else:
-                cuda_info["error"] = _CUDA_ERROR
-        else:
-            cuda_info["probed"] = bool(probe_cuda)
-            cuda_info["error"] = _CUDA_ERROR or "torch.cuda.is_available() == False"
-    status["torch_cuda_extension"] = cuda_info
-    status["session_backends"] = {"used": sorted(_SESSION_BACKENDS)}
-    return status
-
     def transform(self, tensor: np.ndarray) -> np.ndarray:
         """Convert liquidity windows into vectorised persistence summaries."""
 
@@ -872,6 +806,72 @@ def topology_backend_status(*, probe_cuda: bool = False) -> Dict[str, Dict[str, 
 
         env = _os.environ.get("TORPEDOCODE_STRICT_TDA", "0").lower() in {"1", "true"}
         return bool(getattr(self.config, "strict_tda", False)) or env
+
+
+def topology_backend_status(*, probe_cuda: bool = False) -> Dict[str, Dict[str, Any]]:
+    """Return a summary of native/CUDA backend availability for reporting."""
+
+    status: Dict[str, Dict[str, Any]] = {}
+    native: Dict[str, Any] = {"available": _tda_native is not None, "version": None}
+    if _tda_native is not None:
+        version = getattr(_tda_native, "__version__", None)
+        native["version"] = str(version) if version is not None else None
+    status["native_module"] = native
+
+    cuda_info: Dict[str, Any] = {
+        "cuda_visible": False,
+        "device_count": None,
+        "torch_cuda_version": None,
+        "compiled": False,
+        "op_registered": False,
+        "probed": False,
+        "error": None,
+        "session_backends": sorted(_SESSION_BACKENDS),
+    }
+
+    if torch is None:
+        cuda_info["error"] = _CUDA_ERROR or "torch not available"
+    else:
+        try:
+            cuda_info["torch_cuda_version"] = getattr(torch.version, "cuda", None)
+        except Exception:  # pragma: no cover - torch without version metadata
+            cuda_info["torch_cuda_version"] = None
+        try:
+            device_count = torch.cuda.device_count()
+        except Exception:  # pragma: no cover - CUDA context issues
+            device_count = None
+        if device_count is not None:
+            try:
+                cuda_info["device_count"] = int(device_count)
+            except Exception:
+                cuda_info["device_count"] = None
+        try:
+            has_cuda = bool(torch.cuda.is_available())
+        except Exception:
+            has_cuda = False
+        if has_cuda:
+            cuda_info["cuda_visible"] = True
+            had_kernel = _CUDA_KERNELS not in (None, False)
+            kernels: Optional[Any]
+            if probe_cuda and not had_kernel:
+                kernels = _get_cuda_extension()
+                had_kernel = kernels not in (None, False)
+            else:
+                kernels = _CUDA_KERNELS if had_kernel else None
+            cuda_info["compiled"] = bool(had_kernel)
+            cuda_info["probed"] = bool(probe_cuda or had_kernel)
+            if had_kernel:
+                ops = getattr(torch.ops, "torpedocode", None)
+                cuda_info["op_registered"] = bool(ops is not None and hasattr(ops, "tda_rolling"))
+                cuda_info["error"] = None
+            else:
+                cuda_info["error"] = _CUDA_ERROR
+        else:
+            cuda_info["probed"] = bool(probe_cuda)
+            cuda_info["error"] = _CUDA_ERROR or "torch.cuda.is_available() == False"
+    status["torch_cuda_extension"] = cuda_info
+    status["session_backends"] = {"used": sorted(_SESSION_BACKENDS)}
+    return status
 
 
 __all__ = ["TopologicalFeatureGenerator", "topology_backend_status"]
