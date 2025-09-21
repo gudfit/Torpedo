@@ -7,6 +7,7 @@ from typing import Optional, Dict
 import json
 import numpy as np
 
+from ..features.topological import topology_backend_status
 from .metrics import (
     compute_point_process_diagnostics,
     delong_ci_auroc,
@@ -46,6 +47,22 @@ def write_tda_backends_json(path: Path) -> None:
         "gudhi": _check_mod("gudhi"),
         "persim": _check_mod("persim"),
     }
+    try:
+        status = topology_backend_status()
+        cuda_info = status.get("torch_cuda_extension", {})
+        report["torch_cuda_extension"] = {
+            "available": bool(cuda_info.get("compiled")),
+            "op_registered": bool(cuda_info.get("op_registered")),
+            "cuda_visible": bool(cuda_info.get("cuda_visible")),
+            "device_count": cuda_info.get("device_count"),
+            "torch_cuda_version": cuda_info.get("torch_cuda_version"),
+            "probed": bool(cuda_info.get("probed")),
+            "session_backends": list(cuda_info.get("session_backends", [])),
+        }
+        if cuda_info.get("error"):
+            report["torch_cuda_extension"]["error"] = str(cuda_info["error"])
+    except Exception as exc:  # pragma: no cover - optional torch dependency
+        report["torch_cuda_extension"] = {"available": False, "error": str(exc)}
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         json.dump(report, f, indent=2)

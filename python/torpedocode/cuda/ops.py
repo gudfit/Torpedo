@@ -32,7 +32,13 @@ def load_extension(
 
     if sources is None:
         base_dir = Path(__file__).resolve().parents[2] / "cpp" / "src"
-        sources = [str(base_dir / "lob_kernels.cu"), str(base_dir / "extension.cpp")]
+        sources = [
+            str(base_dir / "lob_kernels.cu"),
+            str(base_dir / "tda_kernels.cu"),
+            str(base_dir / "tpp_loss.cpp"),
+            str(base_dir / "tda.cpp"),
+            str(base_dir / "extension.cpp"),
+        ]
 
     module = load_cpp_extension(
         name=name,

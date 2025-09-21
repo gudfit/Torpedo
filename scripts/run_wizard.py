@@ -120,6 +120,28 @@ def env_check():
     print("maturin:", _sh.which("maturin") or "missing (optional)")
     print("cargo:", _sh.which("cargo") or "missing (optional)")
     print("nvcc:", _sh.which("nvcc") or "missing (optional)")
+    try:
+        from torpedocode.features.topological import topology_backend_status
+
+        status = topology_backend_status()
+        cuda_info = status.get("torch_cuda_extension", {})
+        visible = bool(cuda_info.get("cuda_visible"))
+        compiled = bool(cuda_info.get("compiled"))
+        op_reg = bool(cuda_info.get("op_registered"))
+        session = cuda_info.get("session_backends", [])
+        parts = [
+            f"torch_cuda_extension: cuda_visible={visible}",
+            f"compiled={compiled}",
+            f"op_registered={op_reg}",
+        ]
+        if session:
+            parts.append("session_backends=" + ",".join(str(s) for s in session))
+        err = cuda_info.get("error")
+        if err:
+            parts.append(f"error={err}")
+        print(" ".join(parts))
+    except Exception as e:  # pragma: no cover - optional torch dependency
+        print(f"torch_cuda_extension: status unavailable ({e})")
 
 
 def build_native_step():
@@ -202,9 +224,17 @@ def build_native_step():
                     f.write("ARTIFACT_ROOT=./artifacts\n")
                     f.write("INSTRUMENT=AAPL\n")
                     f.write("LABEL_KEY=instability_s_1\n")
-                    f.write(
-                        'uv run python -m torpedocode.cli.train \\\n+--instrument "$INSTRUMENT" \\\n+--label-key "$LABEL_KEY" \\\n+--artifact-dir "$ARTIFACT_ROOT/$INSTRUMENT/$LABEL_KEY" \\\n+--epochs 3 --batch 128 --bptt 64 --topo-stride 5 --device cpu \\\n+--expand-types-by-level\n'
-                    )
+                    device_flag = "cuda" if _torch_cuda_available() else "cpu"
+                    cmd_lines = [
+                        "uv run python -m torpedocode.cli.train \\",
+                        "--instrument "$INSTRUMENT" \\",
+                        "--label-key "$LABEL_KEY" \\",
+                        "--artifact-dir "$ARTIFACT_ROOT/$INSTRUMENT/$LABEL_KEY" \\",
+                        "--epochs 3 --batch 128 --bptt 64 --topo-stride 5 "
+                        f"--device {device_flag} \\",
+                        "--expand-types-by-level",
+                    ]
+                    f.write("\n".join(cmd_lines) + "\n")
                     f.write("\n# HOWTO: Count/EWMA options for event-type flow\n")
                     f.write("#  - Add: --count-windows-s 1 5 10   to control causal count windows (seconds)\n")
                     f.write("#  - Add: --ewma-halflives-s 1.0 5.0 to add exponentially decayed counts with half-lives (seconds)\n")
@@ -213,7 +243,13 @@ def build_native_step():
                     # Optional interactive line with user-selected flags
                     if yesno("Add a second command line with custom count/EWMA/PI flags?", default=False):
                         base_cmd = (
-                            'uv run python -m torpedocode.cli.train \\\n+--instrument "$INSTRUMENT" \\\n+--label-key "$LABEL_KEY" \\\n+--artifact-dir "$ARTIFACT_ROOT/$INSTRUMENT/$LABEL_KEY" \\\n+--epochs 3 --batch 128 --bptt 64 --topo-stride 5 --device cpu \\\n+--expand-types-by-level'
+                            "uv run python -m torpedocode.cli.train \",
+                            "--instrument "$INSTRUMENT" \",
+                            "--label-key "$LABEL_KEY" \",
+                            "--artifact-dir "$ARTIFACT_ROOT/$INSTRUMENT/$LABEL_KEY" \",
+                            "--epochs 3 --batch 128 --bptt 64 --topo-stride 5 "
+                            f"--device {device_flag} \",
+                            "--expand-types-by-level"
                         )
                         cw = prompt("Count windows (seconds, space-separated)", default="1 5").strip()
                         hl = prompt("EWMA half-lives (seconds, space-separated)", default="1.0 5.0").strip()

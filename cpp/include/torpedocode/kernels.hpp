@@ -1,6 +1,7 @@
 #pragma once
 
 #include <torch/extension.h>
+#include <string>
 
 namespace torpedocode {
 
@@ -41,5 +42,22 @@ struct TPPLossOutputs {
 };
 
 TPPLossOutputs tpp_loss(const TPPLossInputs &inputs);
+
+struct RollingTopoInputs {
+  torch::Tensor series;
+  torch::Tensor timestamps;
+  torch::Tensor window_sizes;
+  int64_t stride;
+  int64_t embedding_dim;
+  std::string config_json;
+};
+
+struct RollingTopoOutputs {
+  torch::Tensor embeddings;
+};
+
+RollingTopoOutputs rolling_topo_cpu(const RollingTopoInputs &inputs);
+RollingTopoOutputs rolling_topo_cuda(const RollingTopoInputs &inputs);
+RollingTopoOutputs rolling_topo(const RollingTopoInputs &inputs);
 
 } // namespace torpedocode
