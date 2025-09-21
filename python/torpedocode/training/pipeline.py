@@ -85,18 +85,14 @@ class TrainingPipeline:
             self.model.train()
             last_loss = None
             loader = train_loader
-            batch_bar = None
             if _tqdm is not None:
                 try:
                     total_batches = len(loader)  # type: ignore[arg-type]
                 except Exception:
                     total_batches = None
-                batch_bar = _tqdm(total=total_batches, desc=f"e{state.epoch+1}", leave=False)
-                try:
-                    loader = iter(loader)
-                except Exception:
-                    pass
-            for batch in (loader if _tqdm is None else iter(train_loader)):
+                loader = _tqdm(loader, total=total_batches, desc=f"e{state.epoch+1}", leave=False)
+
+            for batch in loader:
                 batch = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in batch.items()}
                 if self.config.training.bptt_steps and batch["features"].ndim == 3:
                     T = batch["features"].shape[1]
@@ -140,11 +136,6 @@ class TrainingPipeline:
                     )
                     optimizer.step()
                 last_loss = loss_outputs
-                if batch_bar is not None:
-                    try:
-                        batch_bar.update(1)
-                    except Exception:
-                        pass
             if last_loss is None:
                 # Be tolerant in tiny/demo or edge splits: allow training to proceed
                 # without batches so downstream steps (eval/predictions) can run.
