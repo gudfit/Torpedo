@@ -60,6 +60,8 @@ class TopologyConfig:
     image_auto_range: bool = True
     image_birth_range: tuple[float, float] | None = None
     image_pers_range: tuple[float, float] | None = None
+    # Number of windows to sample when estimating automatic image ranges; 0 uses all
+    image_auto_sample_limit: int = 2048
     strict_tda: bool = False
     vr_auto_epsilon: bool = True
     vr_connectivity_quantile: float = 0.99
