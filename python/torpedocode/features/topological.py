@@ -82,6 +82,9 @@ class TopologicalFeatureGenerator:
             except Exception:
                 ts_ns = ts.astype("datetime64[ns]").astype("int64")
         T, F = series.shape
+        step = max(1, int(stride))
+        num_steps = (T + step - 1) // step
+        indices = range(0, T, step)
         wlist = (
             list(window_sizes_s) if window_sizes_s is not None else list(self.config.window_sizes_s)
         )
@@ -135,9 +138,7 @@ class TopologicalFeatureGenerator:
 
             flag = _os.environ.get("WIZARD_TOPO_PROGRESS", "0").lower() in {"1", "true", "y"}
             if flag:
-                total_steps = 0
-                for _ in wlist:
-                    total_steps += int(np.ceil(T / max(1, int(stride))))
+                total_steps = len(wlist) * num_steps
                 bar = _tqdm(total=total_steps, desc="tda", leave=False)
                 show_prog = True
         except Exception:
@@ -145,6 +146,7 @@ class TopologicalFeatureGenerator:
         for w in wlist:
             w_ns = int(w) * 1_000_000_000
             reps = np.zeros((T, self._embedding_dim()), dtype=np.float32)
+            left_idx = np.searchsorted(ts_ns, ts_ns - w_ns, side="right").astype(np.int64, copy=False)
             use_image = self.config.persistence_representation == "image"
             need_auto = bool(getattr(self.config, "image_auto_range", False)) and (
                 getattr(self.config, "image_birth_range", None) is None
@@ -153,9 +155,16 @@ class TopologicalFeatureGenerator:
             births: List[float] = []
             pers: List[float] = []
             if use_image and need_auto:
-                for i in range(0, T, max(1, int(stride))):
-                    left = ts_ns[i] - w_ns
-                    j0 = int(np.searchsorted(ts_ns, left, side="right"))
+                sample_limit = int(getattr(self.config, "image_auto_sample_limit", 2048) or 0)
+                if sample_limit > 0 and num_steps > sample_limit:
+                    positions = np.linspace(0, num_steps - 1, sample_limit, dtype=int)
+                    auto_iter = (int(pos) * step for pos in positions)
+                else:
+                    auto_iter = indices
+                for i in auto_iter:
+                    j0 = int(left_idx[i])
+                    if j0 >= i + 1:
+                        continue
                     slab = series[j0 : i + 1]
                     try:
                         if self.config.complex_type == "cubical" and getattr(
@@ -189,22 +198,35 @@ class TopologicalFeatureGenerator:
                 self._active_birth_range = getattr(self.config, "image_birth_range", None)
                 self._active_pers_range = getattr(self.config, "image_pers_range", None)
 
-            for i in range(0, T, max(1, int(stride))):
-                left = ts_ns[i] - w_ns
-                j0 = int(np.searchsorted(ts_ns, left, side="right"))
+            for i in indices:
+                j0 = int(left_idx[i])
+                if j0 >= i + 1:
+                    reps[i] = 0.0
+                    if show_prog and bar is not None:
+                        try:
+                            bar.update(1)
+                        except Exception:
+                            pass
+                    continue
                 slab = series[j0 : i + 1]
-                try:
-                    if self.config.complex_type == "cubical" and getattr(
-                        self.config, "use_liquidity_surface", True
-                    ):
-                        field = self._liquidity_surface_field(slab)
-                        diags = self._compute_diagram(field)
-                    else:
-                        diags = self._compute_diagram(slab)
-                    reps[i] = self._vectorise(diags)
-                except Exception:
-                    if self._strict():
-                        raise
+                skip_compute = (
+                    self.config.complex_type == "vietoris_rips" and slab.shape[0] < 3
+                )
+                if not skip_compute:
+                    try:
+                        if self.config.complex_type == "cubical" and getattr(
+                            self.config, "use_liquidity_surface", True
+                        ):
+                            field = self._liquidity_surface_field(slab)
+                            diags = self._compute_diagram(field)
+                        else:
+                            diags = self._compute_diagram(slab)
+                        reps[i] = self._vectorise(diags)
+                    except Exception:
+                        if self._strict():
+                            raise
+                        reps[i] = 0.0
+                else:
                     reps[i] = 0.0
                 if show_prog and bar is not None:
                     try:
@@ -584,30 +606,66 @@ class TopologicalFeatureGenerator:
         except Exception:
             if self._strict():
                 raise RuntimeError("persim not available and TORPEDOCODE_STRICT_TDA=1")
-            res = self.config.image_resolution
-            img = np.zeros((res, res), dtype=np.float32)
-            for D in diag[: self.config.max_homology_dimension + 1]:
-                if D.size == 0:
+            res = int(self.config.image_resolution)
+            flat = max(res * res, 1)
+            dims = self.config.max_homology_dimension + 1
+            imgs: List[np.ndarray] = []
+            active_birth = getattr(self, "_active_birth_range", None)
+            active_pers = getattr(self, "_active_pers_range", None)
+            cfg_birth = getattr(self.config, "image_birth_range", None)
+            cfg_pers = getattr(self.config, "image_pers_range", None)
+            for dim in range(dims):
+                D = diag[dim] if dim < len(diag) else None
+                if not isinstance(D, np.ndarray) or D.size == 0:
+                    imgs.append(np.zeros((flat,), dtype=np.float32))
                     continue
-                B = D[:, 0]
-                P = D[:, 1]
-                if B.size == 0:
+                arr = np.asarray(D, dtype=np.float64)
+                if arr.ndim != 2 or arr.shape[1] < 2:
+                    imgs.append(np.zeros((flat,), dtype=np.float32))
                     continue
-                if hasattr(self, "_active_birth_range") and self._active_birth_range is not None:
-                    b0, b1 = self._active_birth_range
+                B = np.nan_to_num(arr[:, 0], nan=0.0, posinf=0.0, neginf=0.0)
+                P = np.nan_to_num(arr[:, 1], nan=0.0, posinf=0.0, neginf=0.0)
+                if B.size == 0 or P.size == 0:
+                    imgs.append(np.zeros((flat,), dtype=np.float32))
+                    continue
+                if active_birth is not None:
+                    b0, b1 = active_birth
+                elif cfg_birth is not None:
+                    b0, b1 = cfg_birth
                 else:
-                    b0, b1 = float(np.min(B)), float(np.max(B))
-                if hasattr(self, "_active_pers_range") and self._active_pers_range is not None:
-                    p0, p1 = self._active_pers_range
+                    b0 = float(np.min(B))
+                    b1 = float(np.max(B))
+                if not np.isfinite(b0) or not np.isfinite(b1):
+                    b0, b1 = 0.0, 1.0
+                if b1 <= b0:
+                    b1 = b0 + 1.0
+                denom_b = b1 - b0 if (b1 - b0) > 1e-8 else 1.0
+                if active_pers is not None:
+                    p0, p1 = active_pers
+                elif cfg_pers is not None:
+                    p0, p1 = cfg_pers
                 else:
-                    p0, p1 = float(np.min(P)), float(np.max(P))
-                denom_b = (b1 - b0) if (b1 - b0) > 1e-8 else 1.0
-                denom_p = (p1 - p0) if (p1 - p0) > 1e-8 else 1.0
-                bi = np.clip(((B - b0) / denom_b) * (res - 1), 0, res - 1).astype(int)
-                pi = np.clip(((P - p0) / denom_p) * (res - 1), 0, res - 1).astype(int)
-                for x, y in zip(bi, pi):
-                    img[y, x] += 1.0
-            return np.nan_to_num(img.flatten(), nan=0.0, posinf=0.0, neginf=0.0)
+                    p0 = float(np.min(P))
+                    p1 = float(np.max(P))
+                if not np.isfinite(p0) or not np.isfinite(p1):
+                    p0, p1 = 0.0, 1.0
+                if p1 <= p0:
+                    p1 = p0 + 1.0
+                denom_p = p1 - p0 if (p1 - p0) > 1e-8 else 1.0
+                if res > 1:
+                    scale = res - 1
+                    bi = np.clip(((B - b0) / denom_b) * scale, 0, scale).astype(np.int64, copy=False)
+                    pi = np.clip(((P - p0) / denom_p) * scale, 0, scale).astype(np.int64, copy=False)
+                else:
+                    bi = np.zeros_like(B, dtype=np.int64)
+                    pi = np.zeros_like(P, dtype=np.int64)
+                idx = pi * res + bi
+                counts = np.bincount(idx, minlength=flat).astype(np.float32, copy=False)
+                imgs.append(counts)
+            if not imgs:
+                return np.zeros((0,), dtype=np.float32)
+            vec = np.concatenate(imgs, axis=0)
+            return np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
 
         b_range = (
             getattr(self, "_active_birth_range", None)
