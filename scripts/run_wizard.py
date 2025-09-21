@@ -227,11 +227,10 @@ def build_native_step():
                     device_flag = "cuda" if _torch_cuda_available() else "cpu"
                     cmd_lines = [
                         "uv run python -m torpedocode.cli.train \\",
-                        "--instrument "$INSTRUMENT" \\",
-                        "--label-key "$LABEL_KEY" \\",
-                        "--artifact-dir "$ARTIFACT_ROOT/$INSTRUMENT/$LABEL_KEY" \\",
-                        "--epochs 3 --batch 128 --bptt 64 --topo-stride 5 "
-                        f"--device {device_flag} \\",
+                        '--instrument "$INSTRUMENT" \\',
+                        '--label-key "$LABEL_KEY" \\',
+                        '--artifact-dir "$ARTIFACT_ROOT/$INSTRUMENT/$LABEL_KEY" \\',
+                        f"--epochs 3 --batch 128 --bptt 64 --topo-stride 5 --device {device_flag} \\",
                         "--expand-types-by-level",
                     ]
                     f.write("\n".join(cmd_lines) + "\n")
@@ -1003,6 +1002,8 @@ def option_crypto(cache_root: Path):
             sys.executable,
             "-m",
             "torpedocode.cli.train_multi",
+            "--instrument",
+            symbol,
             "--cache-root",
             str(cache_root),
             "--artifact-root",
