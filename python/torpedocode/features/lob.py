@@ -17,7 +17,15 @@ computed approximately by detecting size/price changes.
 
 from __future__ import annotations
 
+import os
 from typing import Dict, Iterable, List, Tuple
+
+try:
+    from tqdm import tqdm
+except ImportError:
+
+    def tqdm(iterable, *args, **kwargs):
+        return iterable
 
 import numpy as np
 import pandas as pd
@@ -236,7 +244,8 @@ def build_lob_feature_matrix(
     )
     etype_col = frame.get("event_type", pd.Series([None] * len(frame))).astype(str)
 
-    for l in range(1, levels + 1):
+    progress_enabled = os.environ.get("WIZARD_TOPO_PROGRESS", "0").lower() in {"1", "true", "y"}
+    for l in tqdm(range(1, levels + 1), desc="LOB Features", disable=not progress_enabled):
         bs = frame.get(
             f"bid_size_{l}", pd.Series(index=frame.index, dtype=float).fillna(0.0)
         ).to_numpy()
