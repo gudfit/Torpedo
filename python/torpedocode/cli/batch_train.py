@@ -39,6 +39,7 @@ def _predict_probs(
 
 
 def main():
+    import json
     if torch is None:
         raise SystemExit("PyTorch is required: pip install torch")
     ap = argparse.ArgumentParser(description="Batch train hybrid model across instruments")
@@ -299,7 +300,6 @@ def main():
                         continue
                     mx = max(mx, infer_num_types_for_instrument(other))
                 info[f"LOMO_{inst}"] = mx
-        import json
 
         print(json.dumps(info))
         return
@@ -646,7 +646,6 @@ def main():
             art = args.artifact_root / "POOLED" / lbl
             art.mkdir(parents=True, exist_ok=True)
             topo_schema = {"topology": asdict(TopologyConfig(strict_tda=bool(args.strict_tda)))}
-            import json
 
             with open(art / "feature_schema.json", "w") as f:
                 json.dump(topo_schema, f, indent=2)
@@ -729,7 +728,6 @@ def main():
                 art = args.artifact_root / f"LOMO_{inst}" / lbl
                 art.mkdir(parents=True, exist_ok=True)
                 topo_schema = {"topology": asdict(TopologyConfig(strict_tda=bool(args.strict_tda)))}
-                import json
 
                 with open(art / "feature_schema.json", "w") as f:
                     json.dump(topo_schema, f, indent=2)
