@@ -16,6 +16,7 @@ from ..features.topological import TopologicalFeatureGenerator
 from ..utils.scaler import SplitSafeStandardScaler
 from .preprocess import label_instability
 from ..config import TopologyConfig
+from tqdm import tqdm
 
 
 class EventStream(Protocol):

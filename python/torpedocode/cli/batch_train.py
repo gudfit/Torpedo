@@ -213,6 +213,7 @@ def main():
         "true",
     }:
         _os.environ["TORPEDOCODE_PROGRESS"] = "1"
+        _os.environ["WIZARD_TOPO_PROGRESS"] = "1"
 
     import json as _json_topo
 
