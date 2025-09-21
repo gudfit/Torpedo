@@ -5,6 +5,8 @@ Provides reusable DeepLOB-style architectures to avoid duplication in CLIs.
 
 from __future__ import annotations
 
+import math
+
 try:
     import torch
     import torch.nn as nn
@@ -77,39 +79,39 @@ class DeepLOB2018Model(nn.Module):
         neg = 0.01
         self.b1_conv1 = nn.Conv2d(1, 32, kernel_size=(1, 2), stride=(1, 2), padding=0)
         self.b1_bn1 = nn.BatchNorm2d(32)
-        self.b1_conv2 = nn.Conv2d(32, 32, kernel_size=(4, 1), padding="same")
+        self.b1_conv2 = SamePadConv2d(32, 32, kernel_size=(4, 1), padding="same")
         self.b1_bn2 = nn.BatchNorm2d(32)
-        self.b1_conv3 = nn.Conv2d(32, 32, kernel_size=(4, 1), padding="same")
+        self.b1_conv3 = SamePadConv2d(32, 32, kernel_size=(4, 1), padding="same")
         self.b1_bn3 = nn.BatchNorm2d(32)
 
         self.b2_conv1 = nn.Conv2d(32, 32, kernel_size=(1, 2), stride=(1, 2), padding=0)
         self.b2_bn1 = nn.BatchNorm2d(32)
-        self.b2_conv2 = nn.Conv2d(32, 32, kernel_size=(4, 1), padding="same")
+        self.b2_conv2 = SamePadConv2d(32, 32, kernel_size=(4, 1), padding="same")
         self.b2_bn2 = nn.BatchNorm2d(32)
-        self.b2_conv3 = nn.Conv2d(32, 32, kernel_size=(4, 1), padding="same")
+        self.b2_conv3 = SamePadConv2d(32, 32, kernel_size=(4, 1), padding="same")
         self.b2_bn3 = nn.BatchNorm2d(32)
 
         self.b3_conv1 = nn.Conv2d(
             32, 32, kernel_size=(1, max(1, feat_dim // 4)), stride=(1, 1), padding=0
         )
         self.b3_bn1 = nn.BatchNorm2d(32)
-        self.b3_conv2 = nn.Conv2d(32, 32, kernel_size=(4, 1), padding="same")
+        self.b3_conv2 = SamePadConv2d(32, 32, kernel_size=(4, 1), padding="same")
         self.b3_bn2 = nn.BatchNorm2d(32)
-        self.b3_conv3 = nn.Conv2d(32, 32, kernel_size=(4, 1), padding="same")
+        self.b3_conv3 = SamePadConv2d(32, 32, kernel_size=(4, 1), padding="same")
         self.b3_bn3 = nn.BatchNorm2d(32)
 
-        self.inc1_1x1 = nn.Conv2d(32, 64, kernel_size=(1, 1), padding="same")
+        self.inc1_1x1 = SamePadConv2d(32, 64, kernel_size=(1, 1), padding="same")
         self.inc1_bn1 = nn.BatchNorm2d(64)
-        self.inc1_3x1 = nn.Conv2d(64, 64, kernel_size=(3, 1), padding="same")
+        self.inc1_3x1 = SamePadConv2d(64, 64, kernel_size=(3, 1), padding="same")
         self.inc1_bn2 = nn.BatchNorm2d(64)
 
-        self.inc2_1x1 = nn.Conv2d(32, 64, kernel_size=(1, 1), padding="same")
+        self.inc2_1x1 = SamePadConv2d(32, 64, kernel_size=(1, 1), padding="same")
         self.inc2_bn1 = nn.BatchNorm2d(64)
-        self.inc2_5x1 = nn.Conv2d(64, 64, kernel_size=(5, 1), padding="same")
+        self.inc2_5x1 = SamePadConv2d(64, 64, kernel_size=(5, 1), padding="same")
         self.inc2_bn2 = nn.BatchNorm2d(64)
 
         self.inc3_pool = nn.MaxPool2d(kernel_size=(3, 1), stride=(1, 1), padding=(1, 0))
-        self.inc3_1x1 = nn.Conv2d(32, 64, kernel_size=(1, 1), padding="same")
+        self.inc3_1x1 = SamePadConv2d(32, 64, kernel_size=(1, 1), padding="same")
         self.inc3_bn1 = nn.BatchNorm2d(64)
 
         self.act = nn.LeakyReLU(negative_slope=neg, inplace=True)
@@ -149,3 +151,48 @@ __all__ = [
     "DeepLOBFull",
     "DeepLOB2018Model",
 ]
+
+
+def _to_2tuple(val: int | tuple[int, int]) -> tuple[int, int]:
+    if isinstance(val, tuple):
+        return val
+    return (val, val)
+
+
+class SamePadConv2d(nn.Conv2d):
+    """`nn.Conv2d` variant that emulates ``padding="same"`` without warnings."""
+
+    def __init__(self, *args, **kwargs):
+        _require_torch()
+        padding = kwargs.get("padding", 0)
+        self._same_pad = padding == "same"
+        if self._same_pad:
+            kwargs = dict(kwargs)
+            kwargs["padding"] = 0
+        super().__init__(*args, **kwargs)
+
+    def forward(self, input):  # type: ignore[override]
+        _require_torch()
+        if self._same_pad:
+            stride_h, stride_w = _to_2tuple(self.stride)
+            dilation_h, dilation_w = _to_2tuple(self.dilation)
+            kernel_h, kernel_w = _to_2tuple(self.kernel_size)
+            in_h, in_w = input.shape[-2:]
+            out_h = math.ceil(in_h / stride_h)
+            out_w = math.ceil(in_w / stride_w)
+            pad_h = max(
+                (out_h - 1) * stride_h + (kernel_h - 1) * dilation_h + 1 - in_h,
+                0,
+            )
+            pad_w = max(
+                (out_w - 1) * stride_w + (kernel_w - 1) * dilation_w + 1 - in_w,
+                0,
+            )
+            pad_top = pad_h // 2
+            pad_bottom = pad_h - pad_top
+            pad_left = pad_w // 2
+            pad_right = pad_w - pad_left
+            if pad_left or pad_right or pad_top or pad_bottom:
+                input = F.pad(input, (pad_left, pad_right, pad_top, pad_bottom))
+        return super().forward(input)
+
