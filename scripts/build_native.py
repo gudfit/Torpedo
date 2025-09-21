@@ -93,18 +93,25 @@ def build_torch(cuda: bool = False, verbose: bool = True) -> None:
 
     cpp = ROOT / "cpp" / "src" / "extension.cpp"
     tpp = ROOT / "cpp" / "src" / "tpp_loss.cpp"
-    cu = ROOT / "cpp" / "src" / "lob_kernels.cu"
+    lob_cu = ROOT / "cpp" / "src" / "lob_kernels.cu"
+    tda_cpp = ROOT / "cpp" / "src" / "tda.cpp"
+    tda_cu = ROOT / "cpp" / "src" / "tda_kernels.cu"
 
     name = "torpedocode_kernels"
     # Always include C++ sources that define symbols referenced by extension.cpp
     sources = [str(cpp)]
     if tpp.exists():
         sources.append(str(tpp))
+    if tda_cpp.exists():
+        sources.append(str(tda_cpp))
     # Ensure C++17 for host compilation; CUDA will inherit as needed
     extra_cflags = ["-O3", "-std=c++17"]
     extra_cuda_cflags = ["-O3", "-std=c++17"]
     if cuda:
-        sources.append(str(cu))
+        if lob_cu.exists():
+            sources.append(str(lob_cu))
+        if tda_cu.exists():
+            sources.append(str(tda_cu))
         # Define macro to disable CUDA fallback stub in extension.cpp
         extra_cflags = list(extra_cflags) + ["-DTORPEDOCODE_ENABLE_CUDA"]
         extra_cuda_cflags = list(extra_cuda_cflags) + ["-DTORPEDOCODE_ENABLE_CUDA"]

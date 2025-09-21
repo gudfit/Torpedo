@@ -219,12 +219,12 @@ uv-friendly tests
 Metadata and reproducibility
 - Ingest writes a sidecar `<instrument>.ingest.json` with run parameters.
 - Training persists `feature_schema.json`, `split_indices.json`, and optionally `temperature.json`.
-- TDA backend availability/versions are recorded in `tda_backends.json` under the artifact directory.
+- TDA backend availability/versions plus CUDA extension status and the backends exercised during the run are recorded in `tda_backends.json` under the artifact directory.
 - Aggregation supports Benjamini–Hochberg FDR control via the `aggregate` CLI.
 
 Acceleration roadmap (CPU/GPU)
-- The topological features module attempts to use an optional native module `torpedocode_tda` for VR ε/LCC steps; it falls back to pure NumPy when unavailable. GPU/CUDA kernels and
-  broader C++/Rust offloads can be added behind the same API; training already supports an optional native fuse op via `torch.ops.torpedocode.hybrid_forward`.
+- The topological features module attempts to use an optional native module `torpedocode_tda` for VR ε/LCC steps; it falls back to pure NumPy when unavailable. When training is launched with `--device cuda`, the CLI will attempt to JIT-compile and load the Torch CUDA extension for rolling TDA features and falls back to CPU-native/Rust/Python paths if compilation fails.
+  Broader C++/Rust offloads can be added behind the same API; training already supports an optional native fuse op via `torch.ops.torpedocode.hybrid_forward`.
 
 Topology selection and walk-forward
 - Run a lightweight topology search on one market: `python -m torpedocode.cli.topo_search ...` and reuse the selected JSON across

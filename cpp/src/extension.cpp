@@ -1,13 +1,18 @@
 #include <torch/extension.h>
+#include <utility>
 
 #include "torpedocode/kernels.hpp"
 
 namespace torpedocode {
 
 #ifndef TORPEDOCODE_ENABLE_CUDA
-// Provide a CPU fallback stub when building without CUDA to satisfy linker
+// Provide CPU fallbacks when building without CUDA to satisfy the linker.
 HybridForwardOutputs hybrid_forward_cuda(const HybridForwardInputs &inputs) {
   return hybrid_forward_cpu(inputs);
+}
+
+RollingTopoOutputs rolling_topo_cuda(const RollingTopoInputs &inputs) {
+  return rolling_topo_cpu(inputs);
 }
 #endif
 
@@ -116,6 +121,20 @@ TORCH_LIBRARY(torpedocode, m) {
           auto out = torpedocode::tpp_loss(in);
           return std::make_tuple(out.nll_mean, out.smoothness);
         });
+  m.def(
+      "tda_rolling(Tensor series, Tensor timestamps, Tensor window_sizes, int "
+      "stride, int embedding_dim, str config_json='') -> Tensor",
+      [](torch::Tensor series, torch::Tensor timestamps,
+         torch::Tensor window_sizes, int64_t stride, int64_t embedding_dim,
+         std::string config_json) {
+        torpedocode::RollingTopoInputs in{series,
+                                          timestamps,
+                                          window_sizes,
+                                          stride,
+                                          embedding_dim,
+                                          std::move(config_json)};
+        return torpedocode::rolling_topo(in).embeddings;
+      });
 }
 
 // Define a minimal Python module so torch.utils.cpp_extension.load can import
