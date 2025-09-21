@@ -242,28 +242,29 @@ def build_native_step():
                     f.write("#  - Add: --pi-res 128  --pi-sigma 0.02   to match paper configs\n")
                     # Optional interactive line with user-selected flags
                     if yesno("Add a second command line with custom count/EWMA/PI flags?", default=False):
-                        base_cmd = (
-                            "uv run python -m torpedocode.cli.train \",
-                            "--instrument "$INSTRUMENT" \",
-                            "--label-key "$LABEL_KEY" \",
-                            "--artifact-dir "$ARTIFACT_ROOT/$INSTRUMENT/$LABEL_KEY" \",
-                            "--epochs 3 --batch 128 --bptt 64 --topo-stride 5 "
-                            f"--device {device_flag} \",
-                            "--expand-types-by-level"
-                        )
+                        base_cmd_parts = [
+                            "uv run python -m torpedocode.cli.train \\",
+                            "    --instrument \"$INSTRUMENT\" \\",
+                            "    --label-key \"$LABEL_KEY\" \\",
+                            "    --artifact-dir \"$ARTIFACT_ROOT/$INSTRUMENT/$LABEL_KEY\" \\",
+                            "    --epochs 3 --batch 128 --bptt 64 --topo-stride 5 "
+                            f"--device {device_flag} \\",
+                            "    --expand-types-by-level",
+                        ]
                         cw = prompt("Count windows (seconds, space-separated)", default="1 5").strip()
                         hl = prompt("EWMA half-lives (seconds, space-separated)", default="1.0 5.0").strip()
                         res = prompt("PI resolution", default="128").strip()
                         sig = prompt("PI sigma", default="0.02").strip()
                         if cw:
-                            base_cmd += f" \\\n+--count-windows-s {cw}"
+                            base_cmd_parts.append(f"    +--count-windows-s {cw} \\")
                         if hl:
-                            base_cmd += f" \\\n+--ewma-halflives-s {hl}"
+                            base_cmd_parts.append(f"    +--ewma-halflives-s {hl} \\")
                         if res:
-                            base_cmd += f" \\\n+--pi-res {res}"
+                            base_cmd_parts.append(f"    +--pi-res {res} \\")
                         if sig:
-                            base_cmd += f" \\\n+--pi-sigma {sig}"
+                            base_cmd_parts.append(f"    +--pi-sigma {sig}")
                         f.write("\n# With wizard-chosen flags\n")
+                        base_cmd = "\n".join(base_cmd_parts)
                         f.write(base_cmd + "\n")
                 os.chmod(train_sh, 0o755)
                 print(f"[wizard] Wrote {train_sh}")
